@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import sys
 import threading
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -48,6 +49,13 @@ class App(ctk.CTk):
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
+
+        # Set window icon (titlebar + taskbar)
+        try:
+            base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+            self.iconbitmap(str(base / "icon.ico"))
+        except Exception:
+            pass
 
         # Enable TkinterDnD on the existing Tk instance
         if _DND_AVAILABLE:
