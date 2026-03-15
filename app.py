@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageTk
 
 from face_processor import detect_faces_in_image, DetectedFace, Person
 from print_generator import (
@@ -134,7 +134,11 @@ class App(ctk.CTk):
         self._theme_sw.pack(side="right", padx=16)
 
     def _toggle_theme(self) -> None:
-        ctk.set_appearance_mode("light" if self._theme_sw.get() else "dark")
+        mode = "light" if self._theme_sw.get() else "dark"
+        ctk.set_appearance_mode(mode)
+        canvas_bg = "#dbdbdb" if mode == "light" else "#2b2b2b"
+        for c in (self._des_canvas, self._exp_canvas):
+            c.configure(bg=canvas_bg)
 
     # ──────────────────────────────────────────────────────────────────────
     #  Status bar
@@ -561,7 +565,10 @@ class App(ctk.CTk):
         ).pack(side="right", padx=4, pady=6)
 
         self._lib_scroll = ctk.CTkScrollableFrame(tab)
-        self._lib_scroll.pack(fill="both", expand=True, padx=8, pady=4)
+        self._lib_scroll.pack(fill="both", expand=True, padx=4, pady=4)
+        self._lib_cols = 0
+        self._lib_card_width = 140  # approximate card width including padding
+        self._lib_scroll.bind("<Configure>", self._on_lib_resize)
         self._show_lib_empty()
 
     def _show_lib_empty(self) -> None:
@@ -570,6 +577,34 @@ class App(ctk.CTk):
             text="No faces yet — upload images and select faces first.",
             text_color="gray50",
         ).pack(pady=40)
+
+    def _calc_lib_cols(self) -> int:
+        """Return number of columns that fit the current scroll frame width."""
+        try:
+            w = self._lib_scroll.winfo_width()
+        except Exception:
+            w = 800
+        if w < 50:
+            w = 800
+        return max(1, w // self._lib_card_width)
+
+    def _on_lib_resize(self, event=None) -> None:
+        """Reflow cards when the frame width changes."""
+        new_cols = self._calc_lib_cols()
+        if new_cols != self._lib_cols and self._lib_cards:
+            self._lib_cols = new_cols
+            self._regrid_lib_cards()
+
+    def _regrid_lib_cards(self) -> None:
+        """Re-grid all existing cards into current column count — no rebuilds."""
+        cols = self._lib_cols or self._calc_lib_cols()
+        for ci in range(cols):
+            self._lib_scroll.grid_columnconfigure(ci, weight=1)
+        for i, p in enumerate(self.persons):
+            card = self._lib_cards.get(p.id)
+            if card and card.winfo_exists():
+                r, c = divmod(i, cols)
+                card.grid(row=r, column=c, padx=4, pady=4, sticky="n")
 
     def _refresh_library(self) -> None:
         # Skip full rebuild if nothing changed and cards already exist
@@ -590,7 +625,8 @@ class App(ctk.CTk):
             self._show_lib_empty()
             return
 
-        cols = 4
+        self._lib_cols = self._calc_lib_cols()
+        cols = self._lib_cols
         for ci in range(cols):
             self._lib_scroll.grid_columnconfigure(ci, weight=1)
 
@@ -598,7 +634,7 @@ class App(ctk.CTk):
 
         def _build_row(start: int) -> None:
             if token != self._lib_build_token:
-                return  # a newer build started; abort this one
+                return
             end = min(start + cols, len(persons_snapshot))
             for i in range(start, end):
                 self._make_lib_card(persons_snapshot[i], i, cols)
@@ -607,11 +643,11 @@ class App(ctk.CTk):
 
         _build_row(0)
 
-    def _make_lib_card(self, p: "Person", index: int, cols: int = 4) -> None:
+    def _make_lib_card(self, p: "Person", index: int, cols: int = 0) -> None:
+        if cols <= 0:
+            cols = self._lib_cols or self._calc_lib_cols()
         r, c = divmod(index, cols)
 
-        # Use a lightweight tk.Frame for the card shell — far cheaper than
-        # CTkFrame (which is canvas-based) when many cards are on screen.
         is_dark = ctk.get_appearance_mode().lower() == "dark"
         card_bg  = "#2b2b2b" if is_dark else "#ebebeb"
         card_border = "#555555" if is_dark else "#aaaaaa"
@@ -625,64 +661,62 @@ class App(ctk.CTk):
             highlightbackground=card_border,
             highlightthickness=1,
         )
-        card.grid(row=r, column=c, padx=8, pady=8, sticky="n")
+        card.grid(row=r, column=c, padx=4, pady=4, sticky="n")
         self._lib_cards[p.id] = card
 
-        # Use cached thumbnail; only process the image once per person
         if p.id not in self._lib_thumb_cache:
             thumb = p.face_image.convert("RGB")
-            thumb.thumbnail((100, 100), Image.LANCZOS)
-            self._lib_thumb_cache[p.id] = pil_to_ctk(thumb, (100, 100))
+            thumb.thumbnail((80, 80), Image.LANCZOS)
+            self._lib_thumb_cache[p.id] = pil_to_ctk(thumb, (80, 80))
         ref = self._lib_thumb_cache[p.id]
         self._lib_refs.append(ref)
 
-        # CTkLabel is still used for image display (CTkImage requires it)
-        ctk.CTkLabel(card, image=ref, text="", fg_color=card_bg).pack(padx=10, pady=(10, 4))
+        ctk.CTkLabel(card, image=ref, text="", fg_color=card_bg).pack(padx=6, pady=(6, 2))
 
         if p.is_low_res:
             tk.Label(
                 card, text="⚠ Low-res source",
-                fg="#ffaa00", bg=card_bg, font=("Segoe UI", 9),
+                fg="#ffaa00", bg=card_bg, font=("Segoe UI", 8),
             ).pack()
 
         name_var = ctk.StringVar(value=p.name)
         ctk.CTkEntry(
-            card, textvariable=name_var, width=120, justify="center",
-        ).pack(padx=8, pady=4)
+            card, textvariable=name_var, width=110, height=24, justify="center",
+            font=("Segoe UI", 10),
+        ).pack(padx=4, pady=2)
         name_var.trace_add(
             "write",
             lambda *_, pid=p.id, sv=name_var: self._rename(pid, sv.get()),
         )
 
-        # Small ▲ ▼ ✕ buttons: use native tk.Button — much lighter than CTkButton
         btns = tk.Frame(card, bg=card_bg)
-        btns.pack(pady=(0, 4))
+        btns.pack(pady=(0, 2))
         for txt, bg, cmd in [
             ("▲", btn_bg, lambda pid=p.id: self._move(pid, -1)),
             ("▼", btn_bg, lambda pid=p.id: self._move(pid,  1)),
             ("✕", del_bg, lambda pid=p.id: self._delete(pid)),
         ]:
             tk.Button(
-                btns, text=txt, width=2,
+                btns, text=txt, width=2, padx=0, pady=0,
                 bg=bg, fg=btn_fg, relief="flat", borderwidth=0,
                 activebackground=card_border, activeforeground=btn_fg,
                 cursor="hand2", command=cmd,
-            ).pack(side="left", padx=2)
+            ).pack(side="left", padx=1)
 
         in_queue = any(q.id == p.id for q in self.print_queue)
         pq_btn = ctk.CTkButton(
             card,
-            text="✓ In Print Queue" if in_queue else "+ Add to Print Queue",
-            width=140,
+            text="✓ In Queue" if in_queue else "+ Add to Queue",
+            width=100, height=24,
             fg_color="#1a4a28" if in_queue else "#1f538d",
             hover_color="#993333" if in_queue else "#1a4a70",
-            font=("Segoe UI", 11, "bold" if in_queue else "normal"),
+            font=("Segoe UI", 10, "bold" if in_queue else "normal"),
             command=lambda pid=p.id: (
                 self._remove_from_print_queue(pid) if any(q.id == pid for q in self.print_queue)
                 else self._add_to_print_queue(pid)
             ),
         )
-        pq_btn.pack(padx=8, pady=(0, 8))
+        pq_btn.pack(padx=4, pady=(0, 6))
         self._print_btns[p.id] = pq_btn
 
     # ── Library persistence helpers ──────────────────────────────────────
@@ -745,13 +779,12 @@ class App(ctk.CTk):
 
         self.persons[idx], self.persons[j] = self.persons[j], self.persons[idx]
 
-        # Surgically re-grid only the two swapped cards — no full rebuild
-        cols = 4
+        cols = self._lib_cols or self._calc_lib_cols()
         for pos, person in ((idx, self.persons[idx]), (j, self.persons[j])):
             card = self._lib_cards.get(person.id)
             if card and card.winfo_exists():
                 row, col = divmod(pos, cols)
-                card.grid(row=row, column=col, padx=8, pady=8, sticky="n")
+                card.grid(row=row, column=col, padx=4, pady=4, sticky="n")
 
         self._auto_save()
 
@@ -774,13 +807,7 @@ class App(ctk.CTk):
         self.print_queue = [p for p in self.print_queue if p.id != pid]
         self._print_btns.pop(pid, None)
 
-        # Re-position remaining cards to fill the gap
-        cols = 4
-        for i, p in enumerate(self.persons):
-            c = self._lib_cards.get(p.id)
-            if c and c.winfo_exists():
-                r, col = divmod(i, cols)
-                c.grid(row=r, column=col, padx=8, pady=8, sticky="n")
+        self._regrid_lib_cards()
 
         if not self.persons:
             self._show_lib_empty()
@@ -811,14 +838,14 @@ class App(ctk.CTk):
             return
         if in_queue:
             btn.configure(
-                text="✓ In Print Queue",
+                text="✓ In Queue",
                 fg_color="#1a4a28", hover_color="#993333",
                 font=("Segoe UI", 11, "bold"),
                 command=lambda: self._remove_from_print_queue(pid),
             )
         else:
             btn.configure(
-                text="+ Add to Print Queue",
+                text="+ Add to Queue",
                 fg_color="#1f538d", hover_color="#1a4a70",
                 font=("Segoe UI", 11),
                 command=lambda: self._add_to_print_queue(pid),
@@ -875,8 +902,11 @@ class App(ctk.CTk):
             font=("Segoe UI", 13, "bold"),
         ).pack(pady=6)
 
-        self._prev_label = ctk.CTkLabel(right, text="")
-        self._prev_label.pack(fill="both", expand=True, padx=8, pady=8)
+        self._des_canvas = tk.Canvas(
+            right, highlightthickness=0, borderwidth=0, bg="#2b2b2b",
+        )
+        self._des_canvas.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        self._des_canvas.bind("<Configure>", self._on_designer_resize)
 
     def _refresh_designer(self) -> None:
         for w in self._des_scroll.winfo_children():
@@ -887,7 +917,7 @@ class App(ctk.CTk):
         if not self.print_queue:
             ctk.CTkLabel(
                 self._des_scroll,
-                text="Go to My Faces Library and click\n\"+ Add to Print Queue\" on each face.",
+                text="Go to My Faces Library and click\n\"+ Add to Queue\" on each face.",
                 text_color="gray50", justify="center",
             ).pack(pady=30)
             self._update_preview()
@@ -980,6 +1010,13 @@ class App(ctk.CTk):
         self._update_preview()
         self._set_status(f"Set {per_face} each ({n} faces × {per_face} = {per_face * n} slots)")
 
+    def _on_designer_resize(self, event=None) -> None:
+        if not self.print_queue:
+            return
+        if hasattr(self, "_des_resize_job"):
+            self.after_cancel(self._des_resize_job)
+        self._des_resize_job = self.after(80, self._update_preview)
+
     def _update_preview(self) -> None:
         """Designer preview: always page 1 (no pagination)."""
         total_n = sum(p.quantity for p in self.print_queue)
@@ -989,11 +1026,19 @@ class App(ctk.CTk):
             text=f"Total: {total_n} face(s) · {pages} page(s)",
         )
 
+        cw = self._des_canvas.winfo_width()
+        ch = self._des_canvas.winfo_height()
+        if cw < 20 or ch < 20:
+            return
+
         prev = render_preview(self.print_queue, 0)
-        fitted = fit_image(prev, 450, 675)
-        ref = pil_to_ctk(fitted)
-        self._des_refs.append(ref)
-        self._prev_label.configure(image=ref, text="")
+        fitted = fit_image(prev, cw, ch)
+        self._des_preview_photo = ImageTk.PhotoImage(fitted)
+        self._des_canvas.delete("all")
+        self._des_canvas.create_image(
+            cw // 2, ch // 2,
+            image=self._des_preview_photo, anchor="center",
+        )
 
     # ═════════════════════════════════════════════════════════════════════
     #  TAB 4 — Preview & Export
@@ -1005,13 +1050,9 @@ class App(ctk.CTk):
             font=("Segoe UI", 16, "bold"),
         ).pack(pady=8)
 
-        self._exp_label = ctk.CTkLabel(
-            tab, text="Configure faces in Print Designer first.",
-        )
-        self._exp_label.pack(fill="both", expand=True, padx=40, pady=8)
-
+        # Buttons packed first with side="bottom" so they're always visible
         bf = ctk.CTkFrame(tab, fg_color="transparent")
-        bf.pack(pady=10)
+        bf.pack(side="bottom", pady=10)
         ctk.CTkButton(
             bf, text="  Generate Printable PDF",
             command=self._export_pdf, width=220,
@@ -1021,19 +1062,45 @@ class App(ctk.CTk):
             command=self._export_img, width=220,
         ).pack(side="left", padx=8)
 
+        self._exp_canvas = tk.Canvas(
+            tab, highlightthickness=0, borderwidth=0, bg="#2b2b2b",
+        )
+        self._exp_canvas.pack(fill="both", expand=True, padx=40, pady=4)
+        self._exp_canvas.bind("<Configure>", self._on_export_resize)
+
+    def _on_export_resize(self, event=None) -> None:
+        if not self.print_queue:
+            return
+        if hasattr(self, "_exp_resize_job"):
+            self.after_cancel(self._exp_resize_job)
+        self._exp_resize_job = self.after(80, self._refresh_export_preview)
+
     def _refresh_export_preview(self) -> None:
         self._exp_refs.clear()
+        self._exp_canvas.delete("all")
+
         total_n = sum(p.quantity for p in self.print_queue)
+        cw = self._exp_canvas.winfo_width()
+        ch = self._exp_canvas.winfo_height()
+
         if total_n == 0:
-            self._exp_label.configure(
+            self._exp_canvas.create_text(
+                cw // 2, ch // 2,
                 text="Configure faces in Print Designer first.",
+                fill="gray50", font=("Segoe UI", 12),
             )
             return
+
+        if cw < 20 or ch < 20:
+            return
+
         prev = render_preview(self.print_queue, 0, dpi=200)
-        fitted = fit_image(prev, 500, 700)
-        ref = pil_to_ctk(fitted)
-        self._exp_refs.append(ref)
-        self._exp_label.configure(image=ref, text="")
+        fitted = fit_image(prev, cw, ch)
+        self._exp_preview_photo = ImageTk.PhotoImage(fitted)
+        self._exp_canvas.create_image(
+            cw // 2, ch // 2,
+            image=self._exp_preview_photo, anchor="center",
+        )
 
     def _export_pdf(self) -> None:
         if sum(p.quantity for p in self.print_queue) == 0:
