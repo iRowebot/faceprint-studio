@@ -6,6 +6,7 @@ import dataclasses
 import sys
 import threading
 from pathlib import Path
+import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -74,6 +75,9 @@ class App(ctk.CTk):
         self.print_queue: list[Person] = []  # faces queued for printing
         self._print_btns: dict[str, ctk.CTkButton] = {}  # pid → library card button
         self._lib_cards: dict[str, ctk.CTkFrame] = {}   # pid → library card frame
+        self._lib_thumb_cache: dict[str, ctk.CTkImage] = {}  # pid → pre-built CTkImage
+        self._lib_dirty: bool = True   # full rebuild needed when True
+        self._lib_build_token: int = 0  # incremented to cancel stale staggered builds
 
         # Image-ref lists (prevent garbage collection of CTkImage objects)
         self._ann_ref: ctk.CTkImage | None = None
@@ -100,6 +104,7 @@ class App(ctk.CTk):
             return
         self.persons = saved
         self._person_counter = len(saved)
+        self._lib_dirty = True
         self._refresh_library()
         self._set_status(f"Loaded {len(saved)} face(s) from saved library")
 
@@ -514,6 +519,7 @@ class App(ctk.CTk):
             f.selected = False
 
         self._refresh_face_grid()
+        self._lib_dirty = True
         self._refresh_library()
         self._auto_save()
         self._set_status(f"Added {added} face(s) to library")
@@ -566,6 +572,14 @@ class App(ctk.CTk):
         ).pack(pady=40)
 
     def _refresh_library(self) -> None:
+        # Skip full rebuild if nothing changed and cards already exist
+        if not self._lib_dirty and self._lib_cards:
+            return
+
+        self._lib_dirty = False
+        self._lib_build_token += 1
+        token = self._lib_build_token
+
         for w in self._lib_scroll.winfo_children():
             w.destroy()
         self._lib_refs.clear()
@@ -580,67 +594,96 @@ class App(ctk.CTk):
         for ci in range(cols):
             self._lib_scroll.grid_columnconfigure(ci, weight=1)
 
-        for i, p in enumerate(self.persons):
-            r, c = divmod(i, cols)
-            card = ctk.CTkFrame(
-                self._lib_scroll, corner_radius=8,
-                border_width=1, border_color="gray40",
-            )
-            card.grid(row=r, column=c, padx=8, pady=8, sticky="n")
-            self._lib_cards[p.id] = card
+        persons_snapshot = list(self.persons)
 
+        def _build_row(start: int) -> None:
+            if token != self._lib_build_token:
+                return  # a newer build started; abort this one
+            end = min(start + cols, len(persons_snapshot))
+            for i in range(start, end):
+                self._make_lib_card(persons_snapshot[i], i, cols)
+            if end < len(persons_snapshot):
+                self.after(0, _build_row, end)
+
+        _build_row(0)
+
+    def _make_lib_card(self, p: "Person", index: int, cols: int = 4) -> None:
+        r, c = divmod(index, cols)
+
+        # Use a lightweight tk.Frame for the card shell — far cheaper than
+        # CTkFrame (which is canvas-based) when many cards are on screen.
+        is_dark = ctk.get_appearance_mode().lower() == "dark"
+        card_bg  = "#2b2b2b" if is_dark else "#ebebeb"
+        card_border = "#555555" if is_dark else "#aaaaaa"
+        btn_bg   = "#1f538d"
+        del_bg   = "#993333"
+        btn_fg   = "white"
+
+        card = tk.Frame(
+            self._lib_scroll,
+            bg=card_bg,
+            highlightbackground=card_border,
+            highlightthickness=1,
+        )
+        card.grid(row=r, column=c, padx=8, pady=8, sticky="n")
+        self._lib_cards[p.id] = card
+
+        # Use cached thumbnail; only process the image once per person
+        if p.id not in self._lib_thumb_cache:
             thumb = p.face_image.convert("RGB")
             thumb.thumbnail((100, 100), Image.LANCZOS)
-            ref = pil_to_ctk(thumb, (100, 100))
-            self._lib_refs.append(ref)
-            ctk.CTkLabel(card, image=ref, text="").pack(padx=10, pady=(10, 4))
+            self._lib_thumb_cache[p.id] = pil_to_ctk(thumb, (100, 100))
+        ref = self._lib_thumb_cache[p.id]
+        self._lib_refs.append(ref)
 
-            if p.is_low_res:
-                ctk.CTkLabel(
-                    card, text="⚠ Low-res source",
-                    text_color="#ffaa00", font=("Segoe UI", 9),
-                ).pack()
+        # CTkLabel is still used for image display (CTkImage requires it)
+        ctk.CTkLabel(card, image=ref, text="", fg_color=card_bg).pack(padx=10, pady=(10, 4))
 
-            name_var = ctk.StringVar(value=p.name)
-            ctk.CTkEntry(
-                card, textvariable=name_var, width=120, justify="center",
-            ).pack(padx=8, pady=4)
-            name_var.trace_add(
-                "write",
-                lambda *_, pid=p.id, sv=name_var: self._rename(pid, sv.get()),
-            )
+        if p.is_low_res:
+            tk.Label(
+                card, text="⚠ Low-res source",
+                fg="#ffaa00", bg=card_bg, font=("Segoe UI", 9),
+            ).pack()
 
-            btns = ctk.CTkFrame(card, fg_color="transparent")
-            btns.pack(pady=(0, 4))
-            ctk.CTkButton(
-                btns, text="▲", width=30,
-                command=lambda pid=p.id: self._move(pid, -1),
+        name_var = ctk.StringVar(value=p.name)
+        ctk.CTkEntry(
+            card, textvariable=name_var, width=120, justify="center",
+        ).pack(padx=8, pady=4)
+        name_var.trace_add(
+            "write",
+            lambda *_, pid=p.id, sv=name_var: self._rename(pid, sv.get()),
+        )
+
+        # Small ▲ ▼ ✕ buttons: use native tk.Button — much lighter than CTkButton
+        btns = tk.Frame(card, bg=card_bg)
+        btns.pack(pady=(0, 4))
+        for txt, bg, cmd in [
+            ("▲", btn_bg, lambda pid=p.id: self._move(pid, -1)),
+            ("▼", btn_bg, lambda pid=p.id: self._move(pid,  1)),
+            ("✕", del_bg, lambda pid=p.id: self._delete(pid)),
+        ]:
+            tk.Button(
+                btns, text=txt, width=2,
+                bg=bg, fg=btn_fg, relief="flat", borderwidth=0,
+                activebackground=card_border, activeforeground=btn_fg,
+                cursor="hand2", command=cmd,
             ).pack(side="left", padx=2)
-            ctk.CTkButton(
-                btns, text="▼", width=30,
-                command=lambda pid=p.id: self._move(pid, 1),
-            ).pack(side="left", padx=2)
-            ctk.CTkButton(
-                btns, text="✕", width=30,
-                fg_color="#993333", hover_color="#cc4444",
-                command=lambda pid=p.id: self._delete(pid),
-            ).pack(side="left", padx=2)
 
-            in_queue = any(q.id == p.id for q in self.print_queue)
-            pq_btn = ctk.CTkButton(
-                card,
-                text="✓ In Print Queue" if in_queue else "+ Add to Print Queue",
-                width=140,
-                fg_color="#1a4a28" if in_queue else "#1f538d",
-                hover_color="#993333" if in_queue else "#1a4a70",
-                font=("Segoe UI", 11, "bold" if in_queue else "normal"),
-                command=lambda pid=p.id: (
-                    self._remove_from_print_queue(pid) if any(q.id == pid for q in self.print_queue)
-                    else self._add_to_print_queue(pid)
-                ),
-            )
-            pq_btn.pack(padx=8, pady=(0, 8))
-            self._print_btns[p.id] = pq_btn
+        in_queue = any(q.id == p.id for q in self.print_queue)
+        pq_btn = ctk.CTkButton(
+            card,
+            text="✓ In Print Queue" if in_queue else "+ Add to Print Queue",
+            width=140,
+            fg_color="#1a4a28" if in_queue else "#1f538d",
+            hover_color="#993333" if in_queue else "#1a4a70",
+            font=("Segoe UI", 11, "bold" if in_queue else "normal"),
+            command=lambda pid=p.id: (
+                self._remove_from_print_queue(pid) if any(q.id == pid for q in self.print_queue)
+                else self._add_to_print_queue(pid)
+            ),
+        )
+        pq_btn.pack(padx=8, pady=(0, 8))
+        self._print_btns[p.id] = pq_btn
 
     # ── Library persistence helpers ──────────────────────────────────────
 
@@ -660,6 +703,7 @@ class App(ctk.CTk):
 
     def _sort_library_alpha(self) -> None:
         self.persons.sort(key=lambda p: p.name.lower())
+        self._lib_dirty = True
         self._refresh_library()
         self._auto_save()
 
@@ -692,16 +736,23 @@ class App(ctk.CTk):
         self._rename_save_job = self.after(1500, self._auto_save)
 
     def _move(self, pid: str, delta: int) -> None:
-        for i, p in enumerate(self.persons):
-            if p.id == pid:
-                j = i + delta
-                if 0 <= j < len(self.persons):
-                    self.persons[i], self.persons[j] = (
-                        self.persons[j],
-                        self.persons[i],
-                    )
-                break
-        self._refresh_library()
+        idx = next((i for i, p in enumerate(self.persons) if p.id == pid), None)
+        if idx is None:
+            return
+        j = idx + delta
+        if not (0 <= j < len(self.persons)):
+            return
+
+        self.persons[idx], self.persons[j] = self.persons[j], self.persons[idx]
+
+        # Surgically re-grid only the two swapped cards — no full rebuild
+        cols = 4
+        for pos, person in ((idx, self.persons[idx]), (j, self.persons[j])):
+            card = self._lib_cards.get(person.id)
+            if card and card.winfo_exists():
+                row, col = divmod(pos, cols)
+                card.grid(row=row, column=col, padx=8, pady=8, sticky="n")
+
         self._auto_save()
 
     def _delete(self, pid: str) -> None:
@@ -711,6 +762,8 @@ class App(ctk.CTk):
             icon="warning",
         ):
             return
+
+        self._lib_thumb_cache.pop(pid, None)
 
         # Destroy just this card — no full grid rebuild
         card = self._lib_cards.pop(pid, None)
