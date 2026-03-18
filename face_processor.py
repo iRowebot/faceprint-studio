@@ -26,6 +26,7 @@ _LOW_RES_THRESHOLD_PX = 150
 
 _MIN_DETECTION_CONFIDENCE = 0.3
 _NMS_THRESHOLD = 0.3
+_DETECTION_MAX_DIM = 1280   # resize for detection only; keeps YuNet from multi-detecting large faces
 
 _YUNET_MODEL_URL = (
     "https://github.com/opencv/opencv_zoo/raw/main/models/"
@@ -129,9 +130,22 @@ def detect_faces_in_image(
     bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
     h, w = bgr_array.shape[:2]
 
+    # Scale down for detection when the image is large (e.g. 12MP HEIC selfies).
+    # Large images cause YuNet to fire multiple overlapping detections on the same face.
+    # We detect on the downscaled copy and scale coordinates back for full-res cropping.
+    longest = max(w, h)
+    if longest > _DETECTION_MAX_DIM:
+        scale = _DETECTION_MAX_DIM / longest
+        det_w, det_h = int(w * scale), int(h * scale)
+        det_bgr = cv2.resize(bgr_array, (det_w, det_h), interpolation=cv2.INTER_AREA)
+    else:
+        scale = 1.0
+        det_w, det_h = w, h
+        det_bgr = bgr_array
+
     detector = _get_detector()
-    detector.setInputSize((w, h))
-    _, raw_faces = detector.detect(bgr_array)
+    detector.setInputSize((det_w, det_h))
+    _, raw_faces = detector.detect(det_bgr)
 
     annotated = pil_image.copy()
     draw = ImageDraw.Draw(annotated)
@@ -142,10 +156,11 @@ def detect_faces_in_image(
     if raw_faces is not None:
         for face_row in raw_faces:
             # YuNet output: [x, y, w, h, ...landmarks..., score]
-            x1 = max(0, int(face_row[0]))
-            y1 = max(0, int(face_row[1]))
-            x2 = min(w, int(face_row[0] + face_row[2]))
-            y2 = min(h, int(face_row[1] + face_row[3]))
+            # Scale coordinates back to original resolution
+            x1 = max(0, int(face_row[0] / scale))
+            y1 = max(0, int(face_row[1] / scale))
+            x2 = min(w, int((face_row[0] + face_row[2]) / scale))
+            y2 = min(h, int((face_row[1] + face_row[3]) / scale))
 
             if x2 - x1 < 20 or y2 - y1 < 20:
                 continue
@@ -263,12 +278,13 @@ def _tight_crop(
     face_h = bottom - top
     face_cx = (left + right) / 2.0
 
-    # Face fills 88 % of height; allow slight extra width for cheeks
-    final_side = max(face_h / 0.88, face_w * 1.08)
+    # Face (brow→chin) fills 97 % of height; barely 1 % above brows, 2 % below chin
+    # Width just 1 % wider than the detected face to keep sides flush
+    final_side = max(face_h / 0.97, face_w * 1.01)
 
     crop_l = face_cx - final_side / 2.0
     crop_r = face_cx + final_side / 2.0
-    crop_t = top - 0.07 * final_side   # small forehead buffer
+    crop_t = top - 0.01 * final_side   # hairline of brow only
     crop_b = crop_t + final_side
 
     pad_l = int(max(0, -crop_l))
