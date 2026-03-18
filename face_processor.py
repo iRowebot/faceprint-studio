@@ -40,7 +40,8 @@ class DetectedFace:
     source_path: str
     location: Tuple[int, int, int, int]  # (top, right, bottom, left)
     thumbnail: Image.Image
-    cropped: Image.Image
+    cropped: Image.Image          # "Heads" crop (with hair/shoulders)
+    tight_cropped: Image.Image    # "Faces" crop (face-only, tight)
     is_low_res: bool = False
     selected: bool = False
 
@@ -49,7 +50,8 @@ class DetectedFace:
 class Person:
     id: str
     name: str
-    face_image: Image.Image
+    face_image: Image.Image              # "Heads" crop
+    face_tight_image: Image.Image | None = None  # "Faces" crop
     is_low_res: bool = False
     quantity: int = 1
 
@@ -157,6 +159,7 @@ def detect_faces_in_image(
             thumb.thumbnail((80, 80), Image.LANCZOS)
 
             cropped, low = _precise_crop(pil_image, loc)
+            tight, _    = _tight_crop(pil_image, loc)
             faces.append(
                 DetectedFace(
                     id=uuid.uuid4().hex[:8],
@@ -164,6 +167,7 @@ def detect_faces_in_image(
                     location=loc,
                     thumbnail=thumb,
                     cropped=cropped,
+                    tight_cropped=tight,
                     is_low_res=low,
                 )
             )
@@ -199,6 +203,72 @@ def _precise_crop(
     crop_l = face_cx - final_side / 2.0
     crop_r = face_cx + final_side / 2.0
     crop_t = top - 0.20 * final_side
+    crop_b = crop_t + final_side
+
+    pad_l = int(max(0, -crop_l))
+    pad_t = int(max(0, -crop_t))
+    pad_r = int(max(0, crop_r - img_w))
+    pad_b = int(max(0, crop_b - img_h))
+
+    src_l = max(0, int(crop_l))
+    src_t = max(0, int(crop_t))
+    src_r = min(img_w, int(crop_r))
+    src_b = min(img_h, int(crop_b))
+
+    cropped = image.crop((src_l, src_t, src_r, src_b))
+
+    if pad_l or pad_t or pad_r or pad_b:
+        arr = np.array(cropped.convert("RGB"))
+
+        def _edge_fill(pixels: np.ndarray) -> tuple[int, int, int]:
+            return (0, 0, 0) if float(pixels.mean()) < 128 else (255, 255, 255)
+
+        canvas = Image.new(
+            "RGB",
+            (cropped.width + pad_l + pad_r, cropped.height + pad_t + pad_b),
+            (255, 255, 255),
+        )
+        canvas.paste(cropped, (pad_l, pad_t))
+        draw = ImageDraw.Draw(canvas)
+        cw, ch = canvas.size
+
+        if pad_l:
+            draw.rectangle([0, 0, pad_l - 1, ch - 1], fill=_edge_fill(arr[:, 0]))
+        if pad_r:
+            draw.rectangle([cw - pad_r, 0, cw - 1, ch - 1], fill=_edge_fill(arr[:, -1]))
+        if pad_t:
+            draw.rectangle([0, 0, cw - 1, pad_t - 1], fill=_edge_fill(arr[0]))
+        if pad_b:
+            draw.rectangle([0, ch - pad_b, cw - 1, ch - 1], fill=_edge_fill(arr[-1]))
+
+        cropped = canvas
+
+    is_low_res = cropped.width < _LOW_RES_THRESHOLD_PX or cropped.height < _LOW_RES_THRESHOLD_PX
+    final = cropped.resize((CROP_TARGET_PX, CROP_TARGET_PX), Image.LANCZOS)
+    return final, is_low_res
+
+
+def _tight_crop(
+    image: Image.Image,
+    face_loc: Tuple[int, int, int, int],
+) -> Tuple[Image.Image, bool]:
+    """
+    Tighter "faces-only" crop — forehead to chin, cheek to cheek.
+    Face occupies ~88 % of the square height with only a small forehead buffer.
+    """
+    top, right, bottom, left = face_loc
+    img_w, img_h = image.size
+
+    face_w = right - left
+    face_h = bottom - top
+    face_cx = (left + right) / 2.0
+
+    # Face fills 88 % of height; allow slight extra width for cheeks
+    final_side = max(face_h / 0.88, face_w * 1.08)
+
+    crop_l = face_cx - final_side / 2.0
+    crop_r = face_cx + final_side / 2.0
+    crop_t = top - 0.07 * final_side   # small forehead buffer
     crop_b = crop_t + final_side
 
     pad_l = int(max(0, -crop_l))

@@ -77,7 +77,10 @@ class App(ctk.CTk):
         self._layout = next(iter(LAYOUTS.values()))  # active print layout
         self._print_btns: dict[str, ctk.CTkButton] = {}  # pid → library card button
         self._lib_cards: dict[str, ctk.CTkFrame] = {}   # pid → library card frame
-        self._lib_thumb_cache: dict[str, ctk.CTkImage] = {}  # pid → pre-built CTkImage
+        self._lib_thumb_cache: dict[str, ctk.CTkImage] = {}        # pid → heads CTkImage
+        self._lib_thumb_cache_tight: dict[str, ctk.CTkImage] = {}  # pid → faces CTkImage
+        self._lib_crop_mode: str = "Heads"   # "Heads" or "Faces" for library display
+        self._des_crop_mode: str = "Heads"   # "Heads" or "Faces" for designer/export
         self._lib_dirty: bool = True   # full rebuild needed when True
         self._lib_build_token: int = 0  # incremented to cancel stale staggered builds
 
@@ -518,6 +521,7 @@ class App(ctk.CTk):
                     id=f.id,
                     name=f"Face {self._person_counter}",
                     face_image=f.cropped.copy(),
+                    face_tight_image=f.tight_cropped.copy(),
                     is_low_res=f.is_low_res,
                 ),
             )
@@ -556,6 +560,14 @@ class App(ctk.CTk):
             fg_color="#993333", hover_color="#cc4444",
             command=self._clear_saved_library,
         ).pack(side="right", padx=4, pady=6)
+
+        self._lib_crop_seg = ctk.CTkSegmentedButton(
+            hdr, values=["Heads", "Faces"],
+            command=self._on_lib_crop_toggle,
+            width=160, height=30,
+        )
+        self._lib_crop_seg.set("Heads")
+        self._lib_crop_seg.pack(side="right", padx=(4, 0), pady=6)
         ctk.CTkButton(
             hdr, text="Save Library Now", width=150,
             command=self._manual_save,
@@ -666,11 +678,14 @@ class App(ctk.CTk):
         card.grid(row=r, column=c, padx=4, pady=4, sticky="n")
         self._lib_cards[p.id] = card
 
-        if p.id not in self._lib_thumb_cache:
-            thumb = p.face_image.convert("RGB")
+        use_tight = self._lib_crop_mode == "Faces"
+        cache = self._lib_thumb_cache_tight if use_tight else self._lib_thumb_cache
+        if p.id not in cache:
+            src = (p.face_tight_image or p.face_image) if use_tight else p.face_image
+            thumb = src.convert("RGB")
             thumb.thumbnail((80, 80), Image.LANCZOS)
-            self._lib_thumb_cache[p.id] = pil_to_ctk(thumb, (80, 80))
-        ref = self._lib_thumb_cache[p.id]
+            cache[p.id] = pil_to_ctk(thumb, (80, 80))
+        ref = cache[p.id]
         self._lib_refs.append(ref)
 
         ctk.CTkLabel(card, image=ref, text="", fg_color=card_bg).pack(padx=6, pady=(6, 2))
@@ -799,6 +814,7 @@ class App(ctk.CTk):
             return
 
         self._lib_thumb_cache.pop(pid, None)
+        self._lib_thumb_cache_tight.pop(pid, None)
 
         # Destroy just this card — no full grid rebuild
         card = self._lib_cards.pop(pid, None)
@@ -873,18 +889,31 @@ class App(ctk.CTk):
         ).pack(pady=(6, 2))
 
         # Layout size picker
-        size_row = ctk.CTkFrame(left, fg_color="transparent")
-        size_row.pack(fill="x", padx=8, pady=(0, 4))
-        ctk.CTkLabel(size_row, text="Face size:", font=("Segoe UI", 11)).pack(side="left")
+        ctk.CTkLabel(
+            left, text="Face size:", font=("Segoe UI", 12),
+        ).pack(pady=(2, 0))
         self._layout_menu = ctk.CTkOptionMenu(
-            size_row,
+            left,
             values=list(LAYOUTS.keys()),
             command=self._on_layout_change,
-            width=210,
-            font=("Segoe UI", 10),
+            height=34,
+            font=("Segoe UI", 12),
+            dropdown_font=("Segoe UI", 12),
         )
         self._layout_menu.set(list(LAYOUTS.keys())[0])
-        self._layout_menu.pack(side="left", padx=(6, 0))
+        self._layout_menu.pack(fill="x", padx=8, pady=(2, 2))
+
+        ctk.CTkLabel(
+            left, text="Crop mode:", font=("Segoe UI", 12),
+        ).pack(pady=(4, 0))
+        self._des_crop_seg = ctk.CTkSegmentedButton(
+            left, values=["Heads", "Faces"],
+            command=self._on_des_crop_toggle,
+            height=34,
+            font=("Segoe UI", 12),
+        )
+        self._des_crop_seg.set("Heads")
+        self._des_crop_seg.pack(fill="x", padx=8, pady=(2, 6))
 
         # Equalize button
         eq_btn = ctk.CTkButton(
@@ -932,6 +961,16 @@ class App(ctk.CTk):
         self._layout = LAYOUTS[label]
         if hasattr(self, "_layout_info_lbl"):
             self._layout_info_lbl.configure(text=self._layout_info_text())
+        self._update_preview()
+        self._refresh_export_preview()
+
+    def _on_lib_crop_toggle(self, mode: str) -> None:
+        self._lib_crop_mode = mode
+        self._lib_dirty = True
+        self._refresh_library()
+
+    def _on_des_crop_toggle(self, mode: str) -> None:
+        self._des_crop_mode = mode
         self._update_preview()
         self._refresh_export_preview()
 
@@ -1058,7 +1097,8 @@ class App(ctk.CTk):
         if cw < 20 or ch < 20:
             return
 
-        prev = render_preview(self.print_queue, 0, layout=self._layout)
+        prev = render_preview(self.print_queue, 0, layout=self._layout,
+                              use_tight=(self._des_crop_mode == "Faces"))
         fitted = fit_image(prev, cw, ch)
         self._des_preview_photo = ImageTk.PhotoImage(fitted)
         self._des_canvas.delete("all")
@@ -1121,7 +1161,8 @@ class App(ctk.CTk):
         if cw < 20 or ch < 20:
             return
 
-        prev = render_preview(self.print_queue, 0, dpi=200, layout=self._layout)
+        prev = render_preview(self.print_queue, 0, dpi=200, layout=self._layout,
+                              use_tight=(self._des_crop_mode == "Faces"))
         fitted = fit_image(prev, cw, ch)
         self._exp_preview_photo = ImageTk.PhotoImage(fitted)
         self._exp_canvas.create_image(
@@ -1144,7 +1185,8 @@ class App(ctk.CTk):
         if not path:
             return
         try:
-            pages = generate_pdf(self.print_queue, path, layout=self._layout)
+            pages = generate_pdf(self.print_queue, path, layout=self._layout,
+                                 use_tight=(self._des_crop_mode == "Faces"))
             self._set_status(f"PDF saved → {path} ({pages} page(s))")
             messagebox.showinfo(
                 "Success",
@@ -1170,7 +1212,8 @@ class App(ctk.CTk):
         if not path:
             return
         try:
-            generate_high_res(self.print_queue, path, self.current_page, layout=self._layout)
+            generate_high_res(self.print_queue, path, self.current_page, layout=self._layout,
+                              use_tight=(self._des_crop_mode == "Faces"))
             self._set_status(f"Image saved → {path}")
             messagebox.showinfo(
                 "Success",

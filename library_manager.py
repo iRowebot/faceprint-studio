@@ -1,8 +1,9 @@
 """Persist and restore the face library between sessions.
 
 Faces are saved to ~/.faceprint_studio/library/
-  manifest.json  — metadata for every saved person
-  <id>.png       — 300×300 face image for each person
+  manifest.json      — metadata for every saved person
+  <id>.png           — 300×300 "Heads" face image for each person
+  <id>_tight.png     — 300×300 "Faces" (tight) image for each person
 """
 
 from __future__ import annotations
@@ -30,6 +31,11 @@ def save_library(persons: List[Person]) -> None:
     for p in persons:
         img_path = LIBRARY_DIR / f"{p.id}.png"
         p.face_image.convert("RGB").save(img_path, format="PNG", optimize=False)
+
+        tight_path = LIBRARY_DIR / f"{p.id}_tight.png"
+        tight_src = p.face_tight_image if p.face_tight_image is not None else p.face_image
+        tight_src.convert("RGB").save(tight_path, format="PNG", optimize=False)
+
         saved_ids.add(p.id)
         manifest.append(
             {
@@ -44,7 +50,9 @@ def save_library(persons: List[Person]) -> None:
 
     # Remove orphaned PNGs no longer in the library
     for png in LIBRARY_DIR.glob("*.png"):
-        if png.stem not in saved_ids:
+        stem = png.stem
+        base_id = stem.removesuffix("_tight")
+        if base_id not in saved_ids:
             try:
                 png.unlink()
             except Exception:
@@ -74,6 +82,13 @@ def load_library() -> List[Person]:
             face_image = Image.open(img_path).convert("RGB")
         except Exception:
             continue
+
+        tight_path = LIBRARY_DIR / f"{entry['id']}_tight.png"
+        try:
+            face_tight_image = Image.open(tight_path).convert("RGB") if tight_path.exists() else face_image
+        except Exception:
+            face_tight_image = face_image
+
         persons.append(
             Person(
                 id=entry["id"],
@@ -81,6 +96,7 @@ def load_library() -> List[Person]:
                 quantity=entry.get("quantity", 1),
                 is_low_res=entry.get("is_low_res", False),
                 face_image=face_image,
+                face_tight_image=face_tight_image,
             )
         )
     return persons

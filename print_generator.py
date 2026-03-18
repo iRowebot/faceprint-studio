@@ -55,11 +55,12 @@ PER_PAGE: int  = _DEFAULT.per_page
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _flat_faces(persons: List[Person]) -> List[Image.Image]:
+def _flat_faces(persons: List[Person], use_tight: bool = False) -> List[Image.Image]:
     """Expand the person list into a flat sequence respecting quantities."""
     out: list[Image.Image] = []
     for p in persons:
-        out.extend([p.face_image] * p.quantity)
+        img = (p.face_tight_image or p.face_image) if use_tight else p.face_image
+        out.extend([img] * p.quantity)
     return out
 
 
@@ -76,6 +77,7 @@ def render_preview(
     page: int = 0,
     dpi: int = 150,
     layout: Layout | None = None,
+    use_tight: bool = False,
 ) -> Image.Image:
     """Rasterise one page at *dpi* for on-screen preview."""
     lo = layout or _DEFAULT
@@ -86,7 +88,7 @@ def render_preview(
     img = Image.new("RGB", (pw, ph), "white")
     draw = ImageDraw.Draw(img)
 
-    faces = _flat_faces(persons)
+    faces = _flat_faces(persons, use_tight)
     subset = faces[page * lo.per_page : (page + 1) * lo.per_page]
 
     for idx, face in enumerate(subset):
@@ -113,6 +115,7 @@ def generate_pdf(
     persons: List[Person],
     path: str,
     layout: Layout | None = None,
+    use_tight: bool = False,
 ) -> int:
     """Write a 300-DPI-ready PDF at exact 4″×6″.  Returns page count."""
     lo = layout or _DEFAULT
@@ -122,7 +125,7 @@ def generate_pdf(
     c = lo.cell * inch
 
     cv = pdf_canvas.Canvas(path, pagesize=(pw, ph))
-    faces = _flat_faces(persons)
+    faces = _flat_faces(persons, use_tight)
     pages = total_pages(persons, lo)
 
     for pg in range(pages):
@@ -150,6 +153,7 @@ def generate_high_res(
     path: str,
     page: int = 0,
     layout: Layout | None = None,
+    use_tight: bool = False,
 ) -> None:
     """Save a single page as a 300-DPI raster image."""
     lo = layout or _DEFAULT
@@ -159,7 +163,7 @@ def generate_high_res(
     c = int(lo.cell * dpi)
 
     img = Image.new("RGB", (pw, ph), "white")
-    faces = _flat_faces(persons)
+    faces = _flat_faces(persons, use_tight)
     subset = faces[page * lo.per_page : (page + 1) * lo.per_page]
 
     for idx, face in enumerate(subset):
