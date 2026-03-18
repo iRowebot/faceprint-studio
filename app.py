@@ -683,10 +683,6 @@ class App(ctk.CTk):
         self._lib_crop_seg.set("Heads")
         self._lib_crop_seg.pack(side="right", padx=(4, 0), pady=6)
         ctk.CTkButton(
-            hdr, text="Save Library Now", width=150,
-            command=self._manual_save,
-        ).pack(side="right", padx=4, pady=6)
-        ctk.CTkButton(
             hdr, text="Sort A → Z", width=110,
             fg_color="gray40", hover_color="gray30",
             command=self._sort_library_alpha,
@@ -883,9 +879,6 @@ class App(ctk.CTk):
             self._save_status_lbl.configure(
                 text=f"⚠ Save failed: {exc}", text_color="#ff6644",
             )
-
-    def _manual_save(self) -> None:
-        self._auto_save()
 
     def _sort_library_alpha(self) -> None:
         self.persons.sort(key=lambda p: p.name.lower())
@@ -1104,8 +1097,17 @@ class App(ctk.CTk):
 
     def _layout_info_text(self) -> str:
         lo = self._layout
+        def _m(v: float) -> str:
+            if abs(v - 1/8) < 0.001: return "1/8"
+            if abs(v - 1/6) < 0.001: return "1/6"
+            if abs(v - 3/8) < 0.001: return "3/8"
+            return f"{v}\""
+        if lo.margin_h == lo.margin_v:
+            margin_txt = f"Margins {_m(lo.margin_h)}\""
+        else:
+            margin_txt = f"L/R {_m(lo.margin_h)}\", T/B {_m(lo.margin_v)}\""
         return (
-            f"Paper 4\"×6\"  ·  Margins {lo.margin}\"\n"
+            f"Paper 4\"×6\"  ·  {margin_txt}\n"
             f"Cells {lo.cell}\"×{lo.cell}\"  ·  {lo.cols} cols × {lo.rows} rows\n"
             f"{lo.per_page} faces per page"
         )
@@ -1115,7 +1117,6 @@ class App(ctk.CTk):
         if hasattr(self, "_layout_info_lbl"):
             self._layout_info_lbl.configure(text=self._layout_info_text())
         self._update_preview()
-        self._refresh_export_preview()
 
     def _on_lib_crop_toggle(self, mode: str) -> None:
         self._lib_crop_mode = mode
@@ -1125,7 +1126,6 @@ class App(ctk.CTk):
     def _on_des_crop_toggle(self, mode: str) -> None:
         self._des_crop_mode = mode
         self._update_preview()
-        self._refresh_export_preview()
 
     def _refresh_designer(self) -> None:
         for w in self._des_scroll.winfo_children():
