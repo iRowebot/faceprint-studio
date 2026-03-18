@@ -32,9 +32,16 @@ Upload group photos, let the app automatically find every face, organize them in
 ### 2. My Faces Library
 - Rename each face by clicking the name field
 - Use **▲ / ▼** buttons to reorder, or **Sort A → Z** to sort alphabetically
-- Click **+ Add to Print Queue** for each face you want to print
+- Toggle between **Heads** (full head with hair) and **Faces** (tight face-only crop) to preview both versions
+- Click **+ Add to Queue** for each face you want to print
 
 ### 3. Print Designer
+- Select a **face size** from the dropdown:
+  - **0.5" × 0.5"** — 77 faces per page (7 × 11 grid, 0.25" margins)
+  - **1" × 1"** — 15 faces per page (3 × 5 grid, 0.5" margins)
+- Choose a **crop mode**:
+  - **Heads** — full head crop including hair and a bit of neck
+  - **Faces** — tight crop from brow to chin; **recommended for the 0.5" size** where detail matters most
 - Adjust how many copies of each face to print using **− / +**
 - Click **Equalize** to automatically fill the sheet evenly
 - See a live preview of your 4"×6" print sheet on the right
@@ -48,22 +55,24 @@ Upload group photos, let the app automatically find every face, organize them in
 
 ## Print Sheet Details
 
-| Setting | Value |
-|---|---|
-| Paper size | 4" × 6" |
-| Faces per page | 77 (7 columns × 11 rows) |
-| Face size | 0.5" × 0.5" |
-| Margins | 0.25" |
-| Resolution | 300 DPI |
+| Setting | 0.5" × 0.5" layout | 1" × 1" layout |
+|---|---|---|
+| Paper size | 4" × 6" | 4" × 6" |
+| Margins | 0.25" | 0.5" |
+| Grid | 7 columns × 11 rows | 3 columns × 5 rows |
+| Faces per page | 77 | 15 |
+| Resolution | 300 DPI | 300 DPI |
 
 ---
 
 ## Features
 
-- **Automatic face detection** — powered by OpenCV's YuNet model
+- **Automatic face detection** — powered by OpenCV's YuNet model; handles group photos, selfies, and high-resolution HEIC files
+- **Two crop modes** — **Heads** (full head) and **Faces** (tight brow-to-chin) stored per person; switch anytime without re-uploading
+- **Two print layouts** — 0.5"×0.5" (77/page) or 1"×1" (15/page), selectable per print job
 - **Persistent face library** — saves between sessions automatically
 - **HEIC/HEIF support** — works with iPhone photos directly
-- **Smart edge padding** — crops match the photo background color
+- **Smart edge padding** — padding color matches the photo background
 - **Drag & drop** support
 - **Fully offline** after first run — no cloud, no account, no API keys
 
