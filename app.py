@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import dataclasses
 import sys
+import tempfile
 import threading
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
+
+try:
+    import winsound as _winsound
+    def _soft_beep() -> None:
+        _winsound.MessageBeep(_winsound.MB_ICONASTERISK)
+except ImportError:
+    def _soft_beep() -> None:  # type: ignore[misc]
+        pass
 
 import customtkinter as ctk
 from PIL import Image, ImageOps, ImageTk
@@ -17,12 +26,11 @@ from print_generator import (
     render_preview,
     generate_pdf,
     generate_high_res,
-    total_pages,
     PER_PAGE,
     LAYOUTS,
 )
 from utils import pil_to_ctk, fit_image
-from library_manager import save_library, load_library, clear_library
+from library_manager import save_library, load_library, clear_library, LIBRARY_DIR
 
 # Drag-and-drop support — optional; app works fine without it
 try:
@@ -30,6 +38,41 @@ try:
     _DND_AVAILABLE = True
 except ImportError:
     _DND_AVAILABLE = False
+
+# ── Lightweight hover tooltip ─────────────────────────────────────────────────
+class _Tooltip:
+    """Show a small popup label when the mouse hovers over a widget."""
+
+    def __init__(self, widget: tk.Widget, text: str) -> None:
+        self._widget = widget
+        self._text = text
+        self._tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _show(self, event=None) -> None:
+        if self._tip:
+            return
+        x = self._widget.winfo_rootx() + 20
+        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
+        self._tip = tw = tk.Toplevel(self._widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        lbl = tk.Label(
+            tw, text=self._text,
+            justify="left", relief="solid", borderwidth=1,
+            background="#ffffe0", foreground="#111111",
+            font=("Segoe UI", 9), padx=6, pady=4,
+            wraplength=420,
+        )
+        lbl.pack()
+
+    def _hide(self, event=None) -> None:
+        if self._tip:
+            self._tip.destroy()
+            self._tip = None
+
 
 # Theme palette helpers
 _SEL_BG = "#1a3d25"
@@ -84,13 +127,16 @@ class App(ctk.CTk):
         self._lib_dirty: bool = True   # full rebuild needed when True
         self._lib_build_token: int = 0  # incremented to cancel stale staggered builds
 
+        # Upload tab — per-face-card references (id → widget / label)
+        self._face_cards: dict[str, ctk.CTkFrame] = {}
+        self._face_status_lbls: dict[str, ctk.CTkLabel] = {}
+
         # Image-ref lists (prevent garbage collection of CTkImage objects)
         self._ann_ref: ctk.CTkImage | None = None
         self._grid_refs: list[ctk.CTkImage] = []
         self._lib_refs: list[ctk.CTkImage] = []
         self._des_refs: list[ctk.CTkImage] = []
         self._des_qty_entries: dict[str, ctk.CTkEntry] = {}
-        self._exp_refs: list[ctk.CTkImage] = []
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -98,6 +144,9 @@ class App(ctk.CTk):
         self._build_tabs()
         self._build_status_bar()
         self._load_saved_library()
+
+        # Global Ctrl+V paste shortcut (works regardless of focused widget)
+        self.bind_all("<Control-v>", lambda _e: self._paste_from_clipboard())
 
     def _load_saved_library(self) -> None:
         """Restore the library saved from the previous session."""
@@ -142,8 +191,7 @@ class App(ctk.CTk):
         mode = "light" if self._theme_sw.get() else "dark"
         ctk.set_appearance_mode(mode)
         canvas_bg = "#dbdbdb" if mode == "light" else "#2b2b2b"
-        for c in (self._des_canvas, self._exp_canvas):
-            c.configure(bg=canvas_bg)
+        self._des_canvas.configure(bg=canvas_bg)
 
     # ──────────────────────────────────────────────────────────────────────
     #  Status bar
@@ -167,27 +215,23 @@ class App(ctk.CTk):
         self.tabs = ctk.CTkTabview(self, command=self._on_tab_change)
         self.tabs.pack(fill="both", expand=True, padx=8, pady=(4, 0))
 
-        self._tab1 = self.tabs.add("Upload & Select Faces")
+        self._tab1 = self.tabs.add("Import & Select Faces")
         self._tab2 = self.tabs.add("My Faces Library")
-        self._tab3 = self.tabs.add("Print Designer")
-        self._tab4 = self.tabs.add("Preview & Export")
+        self._tab3 = self.tabs.add("Design & Export")
 
         self._build_upload_tab()
         self._build_library_tab()
         self._build_designer_tab()
-        self._build_export_tab()
 
     def _on_tab_change(self) -> None:
         t = self.tabs.get()
         if t == "My Faces Library":
             self._refresh_library()
-        elif t == "Print Designer":
+        elif t == "Design & Export":
             self._refresh_designer()
-        elif t == "Preview & Export":
-            self._refresh_export_preview()
 
     # ═════════════════════════════════════════════════════════════════════
-    #  TAB 1 — Upload & Select Faces
+    #  TAB 1 — Import & Select Faces
     # ═════════════════════════════════════════════════════════════════════
     def _build_upload_tab(self) -> None:
         tab = self._tab1
@@ -199,6 +243,10 @@ class App(ctk.CTk):
             bar, text="  Add Photo(s)", command=self._add_photos, width=150,
         )
         self._add_btn.pack(side="left", padx=6)
+        ctk.CTkButton(
+            bar, text="  Paste (Ctrl+V)", command=self._paste_from_clipboard, width=150,
+            fg_color="gray40", hover_color="gray30",
+        ).pack(side="left", padx=(0, 4))
         ctk.CTkButton(
             bar, text="Clear All", width=90,
             fg_color="gray40", hover_color="gray30",
@@ -230,9 +278,9 @@ class App(ctk.CTk):
         self._drop_zone = ctk.CTkLabel(
             left,
             text=(
-                "Drop photos here\n\nor click  Add Photo(s)  above"
+                "Drop photos here\n\nor use  Add Photo(s)  /  Paste (Ctrl+V)  above"
                 if _DND_AVAILABLE
-                else "Click  Add Photo(s)  above to load photos"
+                else "Use  Add Photo(s)  or  Paste (Ctrl+V)  above to load photos"
             ),
             fg_color="#1e1e2e" if ctk.get_appearance_mode() == "dark" else "#e8e8f0",
             corner_radius=10,
@@ -323,6 +371,42 @@ class App(ctk.CTk):
             return
         self._process_paths(paths)
 
+    def _paste_from_clipboard(self) -> None:
+        """Handle Ctrl+V — accepts a raw image or file paths from the clipboard."""
+        from PIL import ImageGrab
+        try:
+            clip = ImageGrab.grabclipboard()
+        except Exception:
+            clip = None
+
+        if clip is None:
+            self._set_status("Nothing found on clipboard.")
+            return
+
+        image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".heic", ".heif"}
+
+        # Clipboard contains file path(s) (e.g. files copied in Explorer)
+        if isinstance(clip, list):
+            paths = [p for p in clip if Path(str(p)).suffix.lower() in image_exts]
+            if paths:
+                self._process_paths(tuple(str(p) for p in paths))
+            else:
+                self._set_status("No supported image files on clipboard.")
+            return
+
+        # Clipboard contains a raw image (screenshot, copied image in browser, etc.)
+        if isinstance(clip, Image.Image):
+            try:
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                tmp.close()
+                clip.save(tmp.name, format="PNG")
+                self._process_paths((tmp.name,))
+            except Exception as exc:
+                self._set_status(f"Paste failed: {exc}")
+            return
+
+        self._set_status("Clipboard does not contain a supported image.")
+
     def _process_paths(self, paths: tuple[str, ...]) -> None:
         self._set_status(f"Processing {len(paths)} image(s)…")
         self._progress.set(0)
@@ -405,6 +489,8 @@ class App(ctk.CTk):
         for w in self._face_scroll.winfo_children():
             w.destroy()
         self._grid_refs.clear()
+        self._face_cards.clear()
+        self._face_status_lbls.clear()
 
         if not self.detected_faces:
             ctk.CTkLabel(
@@ -437,6 +523,7 @@ class App(ctk.CTk):
             fg_color=_SEL_BG if is_sel else _UNSEL_BG,
         )
         card.grid(row=row, column=col, padx=5, pady=5, sticky="n")
+        self._face_cards[face.id] = card
 
         # Letterbox into a perfect square — never stretch
         thumb_pil = face.thumbnail.convert("RGB")
@@ -460,6 +547,7 @@ class App(ctk.CTk):
             font=("Segoe UI", 10, "bold" if is_sel else "normal"),
         )
         status_lbl.pack(pady=(0, 4))
+        self._face_status_lbls[face.id] = status_lbl
 
         if face.is_low_res:
             ctk.CTkLabel(
@@ -479,11 +567,29 @@ class App(ctk.CTk):
             ))
 
     def _toggle_face(self, fid: str) -> None:
-        for f in self.detected_faces:
-            if f.id == fid:
-                f.selected = not f.selected
-                break
-        self._refresh_face_grid()
+        face = next((f for f in self.detected_faces if f.id == fid), None)
+        if face is None:
+            return
+        face.selected = not face.selected
+        is_sel = face.selected
+
+        # Surgically update only the changed card — no full rebuild
+        card = self._face_cards.get(fid)
+        status_lbl = self._face_status_lbls.get(fid)
+        if card and card.winfo_exists():
+            card.configure(
+                border_color=_SEL_BORDER if is_sel else _UNSEL_BORDER,
+                fg_color=_SEL_BG if is_sel else _UNSEL_BG,
+            )
+        if status_lbl and status_lbl.winfo_exists():
+            status_lbl.configure(
+                text="✓ Selected" if is_sel else "Click to select",
+                text_color=_SEL_BORDER if is_sel else "gray60",
+                font=("Segoe UI", 10, "bold" if is_sel else "normal"),
+            )
+
+        sel = sum(1 for f in self.detected_faces if f.selected)
+        self._sel_label.configure(text=f"{sel} face(s) selected")
 
     def _clear_detections(self) -> None:
         self.detected_faces.clear()
@@ -491,6 +597,8 @@ class App(ctk.CTk):
         self._ann_index = 0
         self._ann_ref = None
         self._grid_refs.clear()
+        self._face_cards.clear()
+        self._face_status_lbls.clear()
         for w in self._face_scroll.winfo_children():
             w.destroy()
         self._img_label.grid_remove()
@@ -554,12 +662,18 @@ class App(ctk.CTk):
         )
         self._save_status_lbl.pack(side="left", padx=8)
 
-        # Right-side controls
-        ctk.CTkButton(
-            hdr, text="Clear Saved Library", width=160,
-            fg_color="#993333", hover_color="#cc4444",
-            command=self._clear_saved_library,
-        ).pack(side="right", padx=4, pady=6)
+        # Right-side controls — info icon with tooltip showing save location
+        _info_lbl = ctk.CTkLabel(
+            hdr, text="ⓘ", width=28, height=28,
+            font=("Segoe UI", 16),
+            text_color="gray60",
+            cursor="question_arrow",
+        )
+        _info_lbl.pack(side="right", padx=(0, 4), pady=6)
+        _Tooltip(
+            _info_lbl,
+            f"Library saved to:\n{LIBRARY_DIR}",
+        )
 
         self._lib_crop_seg = ctk.CTkSegmentedButton(
             hdr, values=["Heads", "Faces"],
@@ -619,6 +733,7 @@ class App(ctk.CTk):
             if card and card.winfo_exists():
                 r, c = divmod(i, cols)
                 card.grid(row=r, column=c, padx=4, pady=4, sticky="n")
+        self.after(50, self._fix_lib_scroll_region)
 
     def _refresh_library(self) -> None:
         # Skip full rebuild if nothing changed and cards already exist
@@ -654,8 +769,28 @@ class App(ctk.CTk):
                 self._make_lib_card(persons_snapshot[i], i, cols)
             if end < len(persons_snapshot):
                 self.after(0, _build_row, end)
+            else:
+                # All cards placed — force the scrollable canvas to recalculate
+                # its scroll region so the scrollbar actually works.
+                self.after(50, self._fix_lib_scroll_region)
 
         _build_row(0)
+
+    def _fix_lib_scroll_region(self) -> None:
+        """Force CTkScrollableFrame to recalculate its scroll region.
+
+        CTkScrollableFrame relies on a <Configure> event on its internal frame
+        to update the canvas scrollregion.  When children are native tk.Frame
+        widgets placed via grid(), that event can be missed.  Calling
+        update_idletasks() flushes pending geometry, then we poke the canvas
+        directly so the scrollbar reflects the real content height.
+        """
+        try:
+            self._lib_scroll.update_idletasks()
+            canvas = self._lib_scroll._parent_canvas  # CTk internal attribute
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass  # Gracefully ignore if CTk internals change in future versions
 
     def _make_lib_card(self, p: "Person", index: int, cols: int = 0) -> None:
         if cols <= 0:
@@ -837,6 +972,10 @@ class App(ctk.CTk):
     def _add_to_print_queue(self, pid: str) -> None:
         if any(p.id == pid for p in self.print_queue):
             return
+        total_used = sum(p.quantity for p in self.print_queue)
+        if total_used >= self._layout.per_page:
+            _soft_beep()
+            return
         for p in self.persons:
             if p.id == pid:
                 self.print_queue.append(dataclasses.replace(p, quantity=1))
@@ -870,7 +1009,7 @@ class App(ctk.CTk):
             )
 
     # ═════════════════════════════════════════════════════════════════════
-    #  TAB 3 — Print Designer
+    #  TAB 3 — Design & Export
     # ═════════════════════════════════════════════════════════════════════
     def _build_designer_tab(self) -> None:
         tab = self._tab3
@@ -915,16 +1054,15 @@ class App(ctk.CTk):
         self._des_crop_seg.set("Heads")
         self._des_crop_seg.pack(fill="x", padx=8, pady=(2, 6))
 
-        # Equalize button
-        eq_btn = ctk.CTkButton(
+        self._des_scroll = ctk.CTkScrollableFrame(left)
+        self._des_scroll.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # Equalize button sits directly below the quantity list
+        ctk.CTkButton(
             left, text="Equalize", width=120,
             fg_color="gray40", hover_color="gray30",
             command=self._equalize_quantities,
-        )
-        eq_btn.pack(pady=(2, 4))
-
-        self._des_scroll = ctk.CTkScrollableFrame(left)
-        self._des_scroll.pack(fill="both", expand=True, padx=4, pady=4)
+        ).pack(pady=(2, 4))
 
         info = ctk.CTkFrame(left, fg_color="transparent")
         info.pack(fill="x", padx=8, pady=4)
@@ -946,8 +1084,23 @@ class App(ctk.CTk):
         self._des_canvas = tk.Canvas(
             right, highlightthickness=0, borderwidth=0, bg="#2b2b2b",
         )
-        self._des_canvas.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        self._des_canvas.pack(fill="both", expand=True, padx=8, pady=(4, 4))
         self._des_canvas.bind("<Configure>", self._on_designer_resize)
+
+        # Export buttons below the preview
+        exp_btns = ctk.CTkFrame(right, fg_color="transparent")
+        exp_btns.pack(fill="x", padx=8, pady=(8, 8))
+        ctk.CTkButton(
+            exp_btns, text="  Generate Printable PDF",
+            command=self._export_pdf, height=34,
+            font=("Segoe UI", 12),
+        ).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ctk.CTkButton(
+            exp_btns, text="  Export High-Res Image",
+            command=self._export_img, height=34,
+            font=("Segoe UI", 12),
+            fg_color="gray40", hover_color="gray30",
+        ).pack(side="left", expand=True, fill="x", padx=(4, 0))
 
     def _layout_info_text(self) -> str:
         lo = self._layout
@@ -1038,9 +1191,19 @@ class App(ctk.CTk):
         self._update_preview()
 
     def _qty_delta(self, pid: str, delta: int) -> None:
+        per_page = self._layout.per_page
         for p in self.print_queue:
             if p.id == pid:
-                p.quantity = max(0, p.quantity + delta)
+                new_qty = max(0, p.quantity + delta)
+                if delta > 0:
+                    # Check if the increment would push the total over the limit
+                    other_total = sum(q.quantity for q in self.print_queue if q.id != pid)
+                    if other_total + new_qty > per_page:
+                        _soft_beep()
+                        new_qty = max(0, per_page - other_total)
+                        if new_qty == p.quantity:
+                            return
+                p.quantity = new_qty
                 break
         ent = self._des_qty_entries.get(pid)
         if ent and ent.winfo_exists():
@@ -1053,10 +1216,17 @@ class App(ctk.CTk):
             v = max(0, int(entry_widget.get()))
         except Exception:
             return
+        per_page = self._layout.per_page
         for p in self.print_queue:
             if p.id == pid:
                 if p.quantity == v:
                     return
+                other_total = sum(q.quantity for q in self.print_queue if q.id != pid)
+                if other_total + v > per_page:
+                    _soft_beep()
+                    v = max(0, per_page - other_total)
+                    entry_widget.delete(0, "end")
+                    entry_widget.insert(0, str(v))
                 p.quantity = v
                 break
         self._update_preview()
@@ -1086,10 +1256,10 @@ class App(ctk.CTk):
     def _update_preview(self) -> None:
         """Designer preview: always page 1 (no pagination)."""
         total_n = sum(p.quantity for p in self.print_queue)
-        pages = total_pages(self.print_queue, self._layout)
+        per_page = self._layout.per_page
 
         self._total_lbl.configure(
-            text=f"Total: {total_n} face(s) · {pages} page(s)",
+            text=f"Total: {total_n} / {per_page} spots used",
         )
 
         cw = self._des_canvas.winfo_width()
@@ -1107,74 +1277,11 @@ class App(ctk.CTk):
             image=self._des_preview_photo, anchor="center",
         )
 
-    # ═════════════════════════════════════════════════════════════════════
-    #  TAB 4 — Preview & Export
-    # ═════════════════════════════════════════════════════════════════════
-    def _build_export_tab(self) -> None:
-        tab = self._tab4
-        ctk.CTkLabel(
-            tab, text="Preview & Export",
-            font=("Segoe UI", 16, "bold"),
-        ).pack(pady=8)
-
-        # Buttons packed first with side="bottom" so they're always visible
-        bf = ctk.CTkFrame(tab, fg_color="transparent")
-        bf.pack(side="bottom", pady=10)
-        ctk.CTkButton(
-            bf, text="  Generate Printable PDF",
-            command=self._export_pdf, width=220,
-        ).pack(side="left", padx=8)
-        ctk.CTkButton(
-            bf, text="  Export High-Res Image",
-            command=self._export_img, width=220,
-        ).pack(side="left", padx=8)
-
-        self._exp_canvas = tk.Canvas(
-            tab, highlightthickness=0, borderwidth=0, bg="#2b2b2b",
-        )
-        self._exp_canvas.pack(fill="both", expand=True, padx=40, pady=4)
-        self._exp_canvas.bind("<Configure>", self._on_export_resize)
-
-    def _on_export_resize(self, event=None) -> None:
-        if not self.print_queue:
-            return
-        if hasattr(self, "_exp_resize_job"):
-            self.after_cancel(self._exp_resize_job)
-        self._exp_resize_job = self.after(80, self._refresh_export_preview)
-
-    def _refresh_export_preview(self) -> None:
-        self._exp_refs.clear()
-        self._exp_canvas.delete("all")
-
-        total_n = sum(p.quantity for p in self.print_queue)
-        cw = self._exp_canvas.winfo_width()
-        ch = self._exp_canvas.winfo_height()
-
-        if total_n == 0:
-            self._exp_canvas.create_text(
-                cw // 2, ch // 2,
-                text="Configure faces in Print Designer first.",
-                fill="gray50", font=("Segoe UI", 12),
-            )
-            return
-
-        if cw < 20 or ch < 20:
-            return
-
-        prev = render_preview(self.print_queue, 0, dpi=200, layout=self._layout,
-                              use_tight=(self._des_crop_mode == "Faces"))
-        fitted = fit_image(prev, cw, ch)
-        self._exp_preview_photo = ImageTk.PhotoImage(fitted)
-        self._exp_canvas.create_image(
-            cw // 2, ch // 2,
-            image=self._exp_preview_photo, anchor="center",
-        )
-
     def _export_pdf(self) -> None:
         if sum(p.quantity for p in self.print_queue) == 0:
             messagebox.showinfo(
                 "Nothing to Export",
-                "Add faces and set quantities in Print Designer.",
+                "Add faces and set quantities on the Design & Export tab.",
             )
             return
         path = filedialog.asksaveasfilename(
@@ -1201,7 +1308,7 @@ class App(ctk.CTk):
         if sum(p.quantity for p in self.print_queue) == 0:
             messagebox.showinfo(
                 "Nothing to Export",
-                "Add faces and set quantities in Print Designer.",
+                "Add faces and set quantities on the Design & Export tab.",
             )
             return
         path = filedialog.asksaveasfilename(
