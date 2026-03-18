@@ -1,8 +1,8 @@
 # FacePrint Studio
 
-A Windows desktop app for detecting, cropping, and printing face photo sheets — built for Walmart 4×6 photo printing.
+A Windows desktop app for detecting, cropping, and printing face photo sheets on standard 4×6 photo paper.
 
-Upload group photos, let the app automatically find every face, organize them into a library, then build a print sheet with however many copies of each face you need. Export a print-ready PDF or PNG and drop it at the Walmart photo counter.
+Upload group photos, let the app automatically find every face, organize them into a library, then build a print sheet with however many copies of each face you need. Export a print-ready PDF or high-res PNG.
 
 ---
 
