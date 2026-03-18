@@ -23,8 +23,8 @@ Upload group photos, let the app automatically find every face, organize them in
 
 ## How to Use
 
-### 1. Upload & Select Faces
-- Click **Add Photo(s)** or drag and drop photos onto the app
+### 1. Import & Select Faces
+- Click **Add Photo(s)**, **Paste (Ctrl+V)**, or drag and drop photos onto the app
 - The app automatically detects every face in the photo
 - Click face thumbnails to select the ones you want
 - Click **Add Selected to Library →**
@@ -35,9 +35,10 @@ Upload group photos, let the app automatically find every face, organize them in
 - Toggle between **Heads** (full head with hair) and **Faces** (tight face-only crop) to preview both versions
 - Click **+ Add to Queue** for each face you want to print
 
-### 3. Print Designer
+### 3. Design & Export
 - Select a **face size** from the dropdown:
   - **0.5" × 0.5"** — 77 faces per page (7 × 11 grid, 0.25" margins)
+  - **0.75" × 0.75"** — 35 faces per page (5 × 7 grid, 1/8" L/R, 3/8" T/B margins)
   - **1" × 1"** — 15 faces per page (3 × 5 grid, 0.5" margins)
 - Choose a **crop mode**:
   - **Heads** — full head crop including hair
@@ -46,22 +47,20 @@ Upload group photos, let the app automatically find every face, organize them in
 - Click **Equalize** to automatically fill the sheet evenly
 - See a live preview of your 4"×6" print sheet on the right
 
-### 4. Preview & Export
-- Click **Generate Printable PDF** to save a print-ready PDF
-- Or click **Export High-Res Image** to save a PNG
+- Click **Generate Printable PDF** or **Export High-Res Image** below the preview
 - Print at **actual size** on **4×6 photo paper** at 300 DPI
 
 ---
 
 ## Print Sheet Details
 
-| Setting | 0.5" × 0.5" layout | 1" × 1" layout |
-|---|---|---|
-| Paper size | 4" × 6" | 4" × 6" |
-| Margins | 0.25" | 0.5" |
-| Grid | 7 columns × 11 rows | 3 columns × 5 rows |
-| Faces per page | 77 | 15 |
-| Resolution | 300 DPI | 300 DPI |
+| Setting | 0.5" × 0.5" layout | 0.75" × 0.75" layout | 1" × 1" layout |
+|---|---|---|---|
+| Paper size | 4" × 6" | 4" × 6" | 4" × 6" |
+| Margins | 0.25" all sides | 1/8" L/R, 3/8" T/B | 0.5" all sides |
+| Grid | 7 × 11 | 5 × 7 | 3 × 5 |
+| Faces per page | 77 | 35 | 15 |
+| Resolution | 300 DPI | 300 DPI | 300 DPI |
 
 ---
 
@@ -69,11 +68,11 @@ Upload group photos, let the app automatically find every face, organize them in
 
 - **Automatic face detection** — powered by OpenCV's YuNet model; handles group photos, selfies, and high-resolution HEIC files
 - **Two crop modes** — **Heads** (full head) and **Faces** (tight brow-to-chin) stored per person; switch anytime without re-uploading
-- **Two print layouts** — 0.5"×0.5" (77/page) or 1"×1" (15/page), selectable per print job
+- **Three print layouts** — 0.5"×0.5" (77/page), 0.75"×0.75" (35/page), or 1"×1" (15/page), selectable per print job
 - **Persistent face library** — saves between sessions automatically
 - **HEIC/HEIF support** — works with iPhone photos directly
 - **Smart edge padding** — padding color matches the photo background
-- **Drag & drop** support
+- **Drag & drop** and **paste from clipboard (Ctrl+V)** support
 - **Fully offline** after first run — no cloud, no account, no API keys
 
 ---
