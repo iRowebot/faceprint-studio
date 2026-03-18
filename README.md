@@ -40,8 +40,8 @@ Upload group photos, let the app automatically find every face, organize them in
   - **0.5" × 0.5"** — 77 faces per page (7 × 11 grid, 0.25" margins)
   - **1" × 1"** — 15 faces per page (3 × 5 grid, 0.5" margins)
 - Choose a **crop mode**:
-  - **Heads** — full head crop including hair and a bit of neck
-  - **Faces** — tight crop from brow to chin; **recommended for the 0.5" size** where detail matters most
+  - **Heads** — full head crop including hair
+  - **Faces** — tight crop from brow to chin; **recommended for 0.5" size faces** where detail matters most
 - Adjust how many copies of each face to print using **− / +**
 - Click **Equalize** to automatically fill the sheet evenly
 - See a live preview of your 4"×6" print sheet on the right
