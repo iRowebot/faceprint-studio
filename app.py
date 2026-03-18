@@ -19,6 +19,7 @@ from print_generator import (
     generate_high_res,
     total_pages,
     PER_PAGE,
+    LAYOUTS,
 )
 from utils import pil_to_ctk, fit_image
 from library_manager import save_library, load_library, clear_library
@@ -73,6 +74,7 @@ class App(ctk.CTk):
         self._annotated_images: list[tuple[Image.Image, str]] = []
         self._ann_index: int = 0
         self.print_queue: list[Person] = []  # faces queued for printing
+        self._layout = next(iter(LAYOUTS.values()))  # active print layout
         self._print_btns: dict[str, ctk.CTkButton] = {}  # pid → library card button
         self._lib_cards: dict[str, ctk.CTkFrame] = {}   # pid → library card frame
         self._lib_thumb_cache: dict[str, ctk.CTkImage] = {}  # pid → pre-built CTkImage
@@ -868,15 +870,29 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             left, text="Faces & Quantities",
             font=("Segoe UI", 13, "bold"),
-        ).pack(pady=6)
+        ).pack(pady=(6, 2))
 
-        # Equalize button — fill grid with equal quantities
+        # Layout size picker
+        size_row = ctk.CTkFrame(left, fg_color="transparent")
+        size_row.pack(fill="x", padx=8, pady=(0, 4))
+        ctk.CTkLabel(size_row, text="Face size:", font=("Segoe UI", 11)).pack(side="left")
+        self._layout_menu = ctk.CTkOptionMenu(
+            size_row,
+            values=list(LAYOUTS.keys()),
+            command=self._on_layout_change,
+            width=210,
+            font=("Segoe UI", 10),
+        )
+        self._layout_menu.set(list(LAYOUTS.keys())[0])
+        self._layout_menu.pack(side="left", padx=(6, 0))
+
+        # Equalize button
         eq_btn = ctk.CTkButton(
             left, text="Equalize", width=120,
             fg_color="gray40", hover_color="gray30",
             command=self._equalize_quantities,
         )
-        eq_btn.pack(pady=4)
+        eq_btn.pack(pady=(2, 4))
 
         self._des_scroll = ctk.CTkScrollableFrame(left)
         self._des_scroll.pack(fill="both", expand=True, padx=4, pady=4)
@@ -885,15 +901,11 @@ class App(ctk.CTk):
         info.pack(fill="x", padx=8, pady=4)
         self._total_lbl = ctk.CTkLabel(info, text="Total: 0 faces · 0 pages")
         self._total_lbl.pack()
-        ctk.CTkLabel(
-            info,
-            text=(
-                "Paper 4\"×6\"  ·  Margins 0.25\"\n"
-                "Cells 0.5\"×0.5\"  ·  7 cols × 11 rows\n"
-                "77 faces per page"
-            ),
+        self._layout_info_lbl = ctk.CTkLabel(
+            info, text=self._layout_info_text(),
             text_color="gray50", font=("Segoe UI", 10), justify="center",
-        ).pack(pady=(2, 0))
+        )
+        self._layout_info_lbl.pack(pady=(2, 0))
 
         right = ctk.CTkFrame(body)
         right.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
@@ -907,6 +919,21 @@ class App(ctk.CTk):
         )
         self._des_canvas.pack(fill="both", expand=True, padx=8, pady=(4, 8))
         self._des_canvas.bind("<Configure>", self._on_designer_resize)
+
+    def _layout_info_text(self) -> str:
+        lo = self._layout
+        return (
+            f"Paper 4\"×6\"  ·  Margins {lo.margin}\"\n"
+            f"Cells {lo.cell}\"×{lo.cell}\"  ·  {lo.cols} cols × {lo.rows} rows\n"
+            f"{lo.per_page} faces per page"
+        )
+
+    def _on_layout_change(self, label: str) -> None:
+        self._layout = LAYOUTS[label]
+        if hasattr(self, "_layout_info_lbl"):
+            self._layout_info_lbl.configure(text=self._layout_info_text())
+        self._update_preview()
+        self._refresh_export_preview()
 
     def _refresh_designer(self) -> None:
         for w in self._des_scroll.winfo_children():
@@ -1000,7 +1027,7 @@ class App(ctk.CTk):
         n = len(self.print_queue)
         if n == 0:
             return
-        per_face = max(1, PER_PAGE // n)
+        per_face = max(1, self._layout.per_page // n)
         for p in self.print_queue:
             p.quantity = per_face
         for pid, ent in self._des_qty_entries.items():
@@ -1020,7 +1047,7 @@ class App(ctk.CTk):
     def _update_preview(self) -> None:
         """Designer preview: always page 1 (no pagination)."""
         total_n = sum(p.quantity for p in self.print_queue)
-        pages = total_pages(self.print_queue)
+        pages = total_pages(self.print_queue, self._layout)
 
         self._total_lbl.configure(
             text=f"Total: {total_n} face(s) · {pages} page(s)",
@@ -1031,7 +1058,7 @@ class App(ctk.CTk):
         if cw < 20 or ch < 20:
             return
 
-        prev = render_preview(self.print_queue, 0)
+        prev = render_preview(self.print_queue, 0, layout=self._layout)
         fitted = fit_image(prev, cw, ch)
         self._des_preview_photo = ImageTk.PhotoImage(fitted)
         self._des_canvas.delete("all")
@@ -1094,7 +1121,7 @@ class App(ctk.CTk):
         if cw < 20 or ch < 20:
             return
 
-        prev = render_preview(self.print_queue, 0, dpi=200)
+        prev = render_preview(self.print_queue, 0, dpi=200, layout=self._layout)
         fitted = fit_image(prev, cw, ch)
         self._exp_preview_photo = ImageTk.PhotoImage(fitted)
         self._exp_canvas.create_image(
@@ -1117,7 +1144,7 @@ class App(ctk.CTk):
         if not path:
             return
         try:
-            pages = generate_pdf(self.print_queue, path)
+            pages = generate_pdf(self.print_queue, path, layout=self._layout)
             self._set_status(f"PDF saved → {path} ({pages} page(s))")
             messagebox.showinfo(
                 "Success",
@@ -1143,7 +1170,7 @@ class App(ctk.CTk):
         if not path:
             return
         try:
-            generate_high_res(self.print_queue, path, self.current_page)
+            generate_high_res(self.print_queue, path, self.current_page, layout=self._layout)
             self._set_status(f"Image saved → {path}")
             messagebox.showinfo(
                 "Success",
