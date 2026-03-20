@@ -19,6 +19,18 @@ Upload group photos, let the app automatically find every face, organize them in
 
 > A small face detection model (~230 KB) will be downloaded automatically on first run. An internet connection is required the first time only.
 
+### When your browser or antivirus blocks the download
+
+**This will happen for many users.** The packaged `.exe` is built with [PyInstaller](https://pyinstaller.org/), which bundles Python and your app into a single file. That pattern is also used by some malware, so **Microsoft Defender**, **Edge**, **Chrome**, and other tools often flag **unsigned** or **newly published** executables—even when the file is safe. This is a **false positive**: the app is not a virus, but automated scanners cannot tell that from reputation alone.
+
+**What you can do:**
+
+1. **Browser** — If the download is blocked or removed, use **Keep** / **Show more** → **Keep anyway** (wording varies). Or download with another browser after allowing the file in Defender (below).
+2. **Windows Security** — Open **Settings → Privacy & security → Windows Security → Virus & threat protection → Protection history**. If `FacePrint Studio.exe` was quarantined, choose **Allow on device** or **Restore** (only download from the [official Releases](https://github.com/iRowebot/faceprint-studio/releases) page).
+3. **Optional exclusion** — If you use the app regularly, you can add a folder exclusion under **Virus & threat protection → Manage settings → Exclusions** (e.g. the folder where you keep the app). Use this only if you trust files you place there.
+
+**Reducing warnings long-term** requires a paid **code-signing certificate** (Authenticode) to sign the executable—common for indie Windows apps but not required to run FacePrint Studio.
+
 ---
 
 ## How to Use
