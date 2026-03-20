@@ -21,15 +21,15 @@ Upload group photos, let the app automatically find every face, organize them in
 
 ### When your browser or antivirus blocks the download
 
-**This will happen for many users.** The packaged `.exe` is built with [PyInstaller](https://pyinstaller.org/), which bundles Python and your app into a single file. That pattern is also used by some malware, so **Microsoft Defender**, **Edge**, **Chrome**, and other tools often flag **unsigned** or **newly published** executables—even when the file is safe. This is a **false positive**: the app is not a virus, but automated scanners cannot tell that from reputation alone.
+**This will happen for many people.** FacePrint Studio is distributed as a single `.exe` file. It was built with [PyInstaller](https://pyinstaller.org/), which bundles Python and the app into one file so you don’t have to install Python yourself. That same kind of packaged file is also used by some harmful software, so **Microsoft Defender**, **Edge**, **Chrome**, and other tools often treat **unsigned** or **newly published** downloads with extra suspicion—even when the file is safe. What you’re seeing is usually a **false positive**: the app isn’t malware, but automated scanners can’t tell a good file from a bad one by reputation alone.
+
+The download isn’t **code-signed** because a Windows code-signing certificate typically costs **about $250–$500 per year**, which isn’t worth paying for a free app. That’s why you may see warnings—but you can still run the program safely if you downloaded it from the [official Releases](https://github.com/iRowebot/faceprint-studio/releases) page.
 
 **What you can do:**
 
-1. **Browser** — If the download is blocked or removed, use **Keep** / **Show more** → **Keep anyway** (wording varies). Or download with another browser after allowing the file in Defender (below).
-2. **Windows Security** — Open **Settings → Privacy & security → Windows Security → Virus & threat protection → Protection history**. If `FacePrint Studio.exe` was quarantined, choose **Allow on device** or **Restore** (only download from the [official Releases](https://github.com/iRowebot/faceprint-studio/releases) page).
-3. **Optional exclusion** — If you use the app regularly, you can add a folder exclusion under **Virus & threat protection → Manage settings → Exclusions** (e.g. the folder where you keep the app). Use this only if you trust files you place there.
-
-**Reducing warnings long-term** requires a paid **code-signing certificate** (Authenticode) to sign the executable—common for indie Windows apps but not required to run FacePrint Studio.
+1. **Browser** — If the download is blocked or removed, look for **Keep** or **Show more** → **Keep anyway** (the exact wording depends on your browser). You can also try another browser after allowing the file in Windows Security (below).
+2. **Windows Security** — Open **Settings → Privacy & security → Windows Security → Virus & threat protection → Protection history**. If `FacePrint Studio.exe` was quarantined, choose **Allow on device** or **Restore** (only use files from the official Releases link above).
+3. **Optional exclusion** — If you use FacePrint Studio often, you can add a folder under **Virus & threat protection → Manage settings → Exclusions** (for example, the folder where you keep the app). Only do this if you’re comfortable trusting files you put in that folder.
 
 ---
 
