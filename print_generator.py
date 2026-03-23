@@ -65,8 +65,12 @@ PER_PAGE: int  = _DEFAULT.per_page
 
 def _flat_faces(persons: List[Person], use_tight: bool = False) -> List[Image.Image]:
     """Expand the person list into a flat sequence respecting quantities."""
+    from library_manager import ensure_face_tight_loaded
+
     out: list[Image.Image] = []
     for p in persons:
+        if use_tight:
+            ensure_face_tight_loaded(p)
         img = (p.face_tight_image or p.face_image) if use_tight else p.face_image
         out.extend([img] * p.quantity)
     return out

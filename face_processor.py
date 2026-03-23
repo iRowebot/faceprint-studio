@@ -24,9 +24,9 @@ CROP_TARGET_PX = 300
 # Based on 0.5" × 0.5" print size at 300 DPI = 150 px.
 _LOW_RES_THRESHOLD_PX = 150
 
-_MIN_DETECTION_CONFIDENCE = 0.3
-_NMS_THRESHOLD = 0.3
-_DETECTION_MAX_DIM = 1280   # resize for detection only; keeps YuNet from multi-detecting large faces
+_MIN_DETECTION_CONFIDENCE = 0.35
+_NMS_THRESHOLD = 0.22  # stricter internal NMS (lower = suppress more overlapping boxes)
+_DETECTION_MAX_DIM = 640    # YuNet works best at this scale; larger dims cause partial-face detection
 
 _YUNET_MODEL_URL = (
     "https://github.com/opencv/opencv_zoo/raw/main/models/"
@@ -55,6 +55,14 @@ class Person:
     face_tight_image: Image.Image | None = None  # "Faces" crop
     is_low_res: bool = False
     quantity: int = 1
+    # Disk: Documents/FacePrintLibrary/{file_stem}.png and {file_stem}_tight.png
+    file_stem: str = ""
+    original_image: str = ""
+    date_added: str = ""
+    # Set when added from Import tab; used to skip duplicate adds in one session
+    source_face_id: str = ""
+    # False after load from disk if PNGs match; True when new or crops changed — enables incremental save
+    needs_png_write: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +70,97 @@ class Person:
 # ---------------------------------------------------------------------------
 
 _DETECTOR = None
+
+
+def _box_iou(
+    a: Tuple[int, int, int, int],
+    b: Tuple[int, int, int, int],
+) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return float(inter / ua) if ua > 0 else 0.0
+
+
+def _fragments_same_face(
+    a: Tuple[int, int, int, int],
+    b: Tuple[int, int, int, int],
+) -> bool:
+    """YuNet often emits stacked strips on one face; IoU is tiny but columns align."""
+    if _box_iou(a, b) >= 0.12:
+        return True
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    aw, ah = ax2 - ax1, ay2 - ay1
+    bw, bh = bx2 - bx1, by2 - by1
+    if aw < 8 or ah < 8 or bw < 8 or bh < 8:
+        return False
+    overlap_w = max(0, min(ax2, bx2) - max(ax1, bx1))
+    col_overlap = overlap_w / min(aw, bw)
+    if col_overlap < 0.36:
+        return False
+    # Vertically stacked slices (forehead / eyes / chin)
+    if ay2 <= by1 or by2 <= ay1:
+        gap = (by1 - ay2) if ay2 <= by1 else (ay1 - by2)
+        mh = max(ah, bh)
+        if gap <= 0.55 * mh + 28:
+            return True
+    # Strong horizontal alignment with vertical overlap (partial IoU)
+    if not (ay2 <= by1 or by2 <= ay1) and col_overlap >= 0.62:
+        return True
+    return False
+
+
+def _merge_yunet_fragments(
+    boxes_xyxy: List[Tuple[int, int, int, int]],
+    scores: List[float],
+) -> tuple[List[Tuple[int, int, int, int]], List[float]]:
+    """Merge stacked / fragmented YuNet boxes into one bbox per real face."""
+    n = len(boxes_xyxy)
+    if n <= 1:
+        return boxes_xyxy, scores
+
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        if parent[i] != i:
+            parent[i] = find(parent[i])
+        return parent[i]
+
+    def union(i: int, j: int) -> None:
+        pi, pj = find(i), find(j)
+        if pi != pj:
+            parent[pi] = pj
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _fragments_same_face(boxes_xyxy[i], boxes_xyxy[j]):
+                union(i, j)
+
+    roots: dict[int, list[int]] = {}
+    for i in range(n):
+        r = find(i)
+        roots.setdefault(r, []).append(i)
+
+    out_boxes: List[Tuple[int, int, int, int]] = []
+    out_scores: List[float] = []
+    for idxs in roots.values():
+        x1 = min(boxes_xyxy[i][0] for i in idxs)
+        y1 = min(boxes_xyxy[i][1] for i in idxs)
+        x2 = max(boxes_xyxy[i][2] for i in idxs)
+        y2 = max(boxes_xyxy[i][3] for i in idxs)
+        sc = max(scores[i] for i in idxs)
+        if x2 - x1 >= 20 and y2 - y1 >= 20:
+            out_boxes.append((x1, y1, x2, y2))
+            out_scores.append(sc)
+
+    return out_boxes, out_scores
 
 
 def _ensure_yunet_model() -> Path:
@@ -153,18 +252,24 @@ def detect_faces_in_image(
 
     faces: List[DetectedFace] = []
 
-    if raw_faces is not None:
+    if raw_faces is not None and len(raw_faces) > 0:
+        # YuNet output: [x, y, w, h, ...landmarks..., score]
+        boxes_xyxy: List[Tuple[int, int, int, int]] = []
+        scores: List[float] = []
         for face_row in raw_faces:
-            # YuNet output: [x, y, w, h, ...landmarks..., score]
-            # Scale coordinates back to original resolution
             x1 = max(0, int(face_row[0] / scale))
             y1 = max(0, int(face_row[1] / scale))
             x2 = min(w, int((face_row[0] + face_row[2]) / scale))
             y2 = min(h, int((face_row[1] + face_row[3]) / scale))
-
             if x2 - x1 < 20 or y2 - y1 < 20:
                 continue
+            score = float(face_row[-1])
+            boxes_xyxy.append((x1, y1, x2, y2))
+            scores.append(score)
 
+        merged_boxes, merged_scores = _merge_yunet_fragments(boxes_xyxy, scores)
+
+        for (x1, y1, x2, y2), _sc in zip(merged_boxes, merged_scores):
             loc: Tuple[int, int, int, int] = (y1, x2, y2, x1)
 
             draw.rectangle([x1, y1, x2, y2], outline="#FF3333", width=stroke)

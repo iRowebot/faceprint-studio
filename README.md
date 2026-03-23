@@ -81,11 +81,32 @@ The download isn’t **code-signed** because a Windows code-signing certificate 
 - **Automatic face detection** — powered by OpenCV's YuNet model; handles group photos, selfies, and high-resolution HEIC files
 - **Two crop modes** — **Heads** (full head) and **Faces** (tight brow-to-chin) stored per person; switch anytime without re-uploading
 - **Three print layouts** — 0.5"×0.5" (77/page), 0.75"×0.75" (35/page), or 1"×1" (15/page), selectable per print job
-- **Persistent face library** — saves between sessions automatically
+- **Persistent face library** — saves between sessions to `Documents/FacePrintLibrary` (`Mom.png`, `library.json`, etc.; filenames preserve your casing). Optional sidecar thumbnails (`*_lib_thumb.jpg`) may appear in the same folder for faster scrolling; they are regenerated as needed and do not replace your PNGs.
 - **HEIC/HEIF support** — works with iPhone photos directly
 - **Smart edge padding** — padding color matches the photo background
 - **Drag & drop** and **paste from clipboard (Ctrl+V)** support
 - **Fully offline** after first run — no cloud, no account, no API keys
+
+---
+
+## Upgrading
+
+### Library location
+
+| Version | Library folder |
+|---|---|
+| Early releases (pre-1.3.0) | `C:\Users\<you>\.faceprint_studio\library` |
+| 1.3.0 and later | `Documents\FacePrintLibrary` |
+
+If you used an early version, your data was stored in a hidden folder under your home directory. Starting in v1.3.0 the library moved to your **Documents** folder so it's easy to find and back up.
+
+**The migration is automatic** — on first launch after updating, the app detects your old library and copies it to the new location. You don't need to do anything.
+
+If you are already on v1.3.0 or later, your library is already at `Documents\FacePrintLibrary` and nothing changes.
+
+### Thumbnails (v1.5.0+)
+
+Newer versions may write small JPEG sidecar thumbnails (`*_lib_thumb.jpg`) alongside your face PNGs in `Documents\FacePrintLibrary`. These are optional display helpers — they are regenerated automatically and do not replace your PNGs. The PNGs and `library.json` remain the source of truth.
 
 ---
 
@@ -103,6 +124,19 @@ python -m venv .venv
 pip install -r requirements.txt
 python main.py
 ```
+
+---
+
+## Building the Windows `.exe` (maintainers)
+
+Requires a Python environment with dependencies from `requirements.txt` plus PyInstaller:
+
+```bash
+pip install pyinstaller
+python -m PyInstaller "FacePrint Studio.spec"
+```
+
+The one-file `FacePrint Studio.exe` is written under `dist/`. The bundled `FacePrint Studio.spec` may reference paths from the machine that produced the last build—adjust `binaries` / `pathex` if Tcl/Tk DLLs are not found on your system.
 
 ---
 

@@ -6,6 +6,8 @@ import dataclasses
 import sys
 import tempfile
 import threading
+import uuid
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -21,6 +23,9 @@ except ImportError:
 import customtkinter as ctk
 from PIL import Image, ImageOps, ImageTk
 
+# Small UI thumbnails: bilinear is much faster than Lanczos with negligible quality loss at ~96px.
+_THUMB_RESAMPLE = getattr(Image, "Resampling", Image).BILINEAR
+
 from face_processor import detect_faces_in_image, DetectedFace, Person
 from print_generator import (
     render_preview,
@@ -30,7 +35,16 @@ from print_generator import (
     LAYOUTS,
 )
 from utils import pil_to_ctk, fit_image
-from library_manager import save_library, load_library, clear_library, LIBRARY_DIR
+from library_manager import (
+    save_library,
+    load_library,
+    clear_library,
+    ensure_library_dir,
+    ensure_face_tight_loaded,
+    load_disk_thumb,
+    LIBRARY_DIR,
+)
+from version import __version__ as _APP_VERSION
 
 # Drag-and-drop support — optional; app works fine without it
 try:
@@ -39,6 +53,22 @@ try:
 except ImportError:
     _DND_AVAILABLE = False
 
+# Designer canvas: low-DPI preview while resizing (fast), full DPI after resize settles
+_DES_PREVIEW_DPI_FAST = 72
+_DES_PREVIEW_DPI_FULL = 150
+_DES_RESIZE_DEBOUNCE_FAST_MS = 80
+_DES_RESIZE_DEBOUNCE_FULL_MS = 280
+# When total print slots exceed these, lower preview DPI to keep UI responsive
+_PREVIEW_SLOTS_SOFT = 60
+_PREVIEW_SLOTS_HARD = 120
+_PREVIEW_DPI_SOFT_CAP = 110
+_PREVIEW_DPI_HARD_CAP = 90
+
+# Library grid: chunk small builds; virtualize only the viewport for large libraries
+_LIB_CHUNK_SIZE = 24
+_LIB_VIRTUAL_THRESHOLD = 40
+_LIB_ROW_HEIGHT = 188
+
 # ── Lightweight hover tooltip ─────────────────────────────────────────────────
 class _Tooltip:
     """Show a small popup label when the mouse hovers over a widget."""
@@ -46,7 +76,7 @@ class _Tooltip:
     def __init__(self, widget: tk.Widget, text: str) -> None:
         self._widget = widget
         self._text = text
-        self._tip: tk.Toplevel | None = None
+        self._tip: tk.Frame | None = None
         widget.bind("<Enter>", self._show, add="+")
         widget.bind("<Leave>", self._hide, add="+")
         widget.bind("<ButtonPress>", self._hide, add="+")
@@ -54,25 +84,44 @@ class _Tooltip:
     def _show(self, event=None) -> None:
         if self._tip:
             return
-        x = self._widget.winfo_rootx() + 20
-        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
-        self._tip = tw = tk.Toplevel(self._widget)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
+
+        root = self._widget.winfo_toplevel()
+        root.update_idletasks()
+
+        # Use relative coords (widget minus root) so DPI scaling cancels out.
+        rel_x = self._widget.winfo_rootx() - root.winfo_rootx()
+        rel_y = self._widget.winfo_rooty() - root.winfo_rooty()
+        w_h = tk.Misc.winfo_height(self._widget)
+
+        self._tip = f = tk.Frame(root, relief="solid", borderwidth=1, bg="#ffffe0")
         lbl = tk.Label(
-            tw, text=self._text,
-            justify="left", relief="solid", borderwidth=1,
+            f, text=self._text,
+            justify="left",
             background="#ffffe0", foreground="#111111",
             font=("Segoe UI", 9), padx=6, pady=4,
             wraplength=420,
         )
         lbl.pack()
+        f.update_idletasks()
+        tip_w = f.winfo_reqwidth()
+        root_w = root.winfo_width()
+
+        x = rel_x
+        y = rel_y + w_h + 4
+
+        if x + tip_w > root_w - 8:
+            x = root_w - tip_w - 8
+        if x < 8:
+            x = 8
+
+        f.place(x=x, y=y)
+        f.lift()
 
     def _hide(self, event=None) -> None:
         if self._tip:
+            self._tip.place_forget()
             self._tip.destroy()
             self._tip = None
-
 
 # Theme palette helpers
 _SEL_BG = "#1a3d25"
@@ -88,7 +137,7 @@ class App(ctk.CTk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("FacePrint Studio")
+        self.title(f"FacePrint Studio  v{_APP_VERSION}")
         self.geometry("1300x840")
         self.minsize(1024, 700)
 
@@ -118,14 +167,19 @@ class App(ctk.CTk):
         self._ann_index: int = 0
         self.print_queue: list[Person] = []  # faces queued for printing
         self._layout = next(iter(LAYOUTS.values()))  # active print layout
-        self._print_btns: dict[str, ctk.CTkButton] = {}  # pid → library card button
-        self._lib_cards: dict[str, ctk.CTkFrame] = {}   # pid → library card frame
-        self._lib_thumb_cache: dict[str, ctk.CTkImage] = {}        # pid → heads CTkImage
-        self._lib_thumb_cache_tight: dict[str, ctk.CTkImage] = {}  # pid → faces CTkImage
+        self._print_btns: dict[str, tk.Button] = {}     # pid → library card button
+        self._lib_cards: dict[str, tk.Frame] = {}      # pid → library card frame
+        self._lib_thumb_cache: dict[str, ImageTk.PhotoImage] = {}        # pid → heads thumb
+        self._lib_thumb_cache_tight: dict[str, ImageTk.PhotoImage] = {}  # pid → faces thumb
+        self._lib_img_labels: dict[str, tk.Label] = {}  # pid → image label (for in-place swap)
         self._lib_crop_mode: str = "Heads"   # "Heads" or "Faces" for library display
         self._des_crop_mode: str = "Heads"   # "Heads" or "Faces" for designer/export
         self._lib_dirty: bool = True   # full rebuild needed when True
         self._lib_build_token: int = 0  # incremented to cancel stale staggered builds
+        self._lib_building: bool = False  # suppress resize during build
+        self._lib_use_virtual: bool = False  # only mount cards near the scroll viewport
+        self._lib_viewport_job: str | None = None
+        self._lib_chunk_job: str | None = None
 
         # Upload tab — per-face-card references (id → widget / label)
         self._face_cards: dict[str, ctk.CTkFrame] = {}
@@ -134,8 +188,9 @@ class App(ctk.CTk):
         # Image-ref lists (prevent garbage collection of CTkImage objects)
         self._ann_ref: ctk.CTkImage | None = None
         self._grid_refs: list[ctk.CTkImage] = []
-        self._lib_refs: list[ctk.CTkImage] = []
-        self._des_refs: list[ctk.CTkImage] = []
+        self._lib_refs: list[ImageTk.PhotoImage] = []
+        self._des_thumb_by_pid: dict[str, ctk.CTkImage] = {}  # GC refs; keyed for incremental remove
+        self._des_row_by_pid: dict[str, ctk.CTkFrame] = {}  # designer quantity rows
         self._des_qty_entries: dict[str, ctk.CTkEntry] = {}
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -150,6 +205,7 @@ class App(ctk.CTk):
 
     def _load_saved_library(self) -> None:
         """Restore the library saved from the previous session."""
+        ensure_library_dir()
         try:
             saved = load_library()
         except Exception:
@@ -159,8 +215,14 @@ class App(ctk.CTk):
         self.persons = saved
         self._person_counter = len(saved)
         self._lib_dirty = True
-        self._refresh_library()
+        # CTkTabview may not invoke `command` when switching tabs — do not rely on _on_tab_change
+        # alone to build cards. Defer with after_idle so the window can paint first, then populate.
         self._set_status(f"Loaded {len(saved)} face(s) from saved library")
+
+        def _deferred_refresh() -> None:
+            self._refresh_library()
+
+        self.after_idle(_deferred_refresh)
 
     def _on_close(self) -> None:
         """Cleanly shut down all background threads before destroying the window."""
@@ -206,7 +268,6 @@ class App(ctk.CTk):
 
     def _set_status(self, msg: str) -> None:
         self._status.set(msg)
-        self.update_idletasks()
 
     # ──────────────────────────────────────────────────────────────────────
     #  Tabs
@@ -228,7 +289,19 @@ class App(ctk.CTk):
         if t == "My Faces Library":
             self._refresh_library()
         elif t == "Design & Export":
-            self._refresh_designer()
+            # Avoid full _refresh_designer on every tab switch — that destroyed and
+            # rebuilt every quantity row (O(n) CTk widgets, multi-second with large queues).
+            # Rows are already built when adding from the library; only rebuild if out of sync.
+            if not self.print_queue:
+                self._refresh_designer()
+            elif self._designer_rows_match_queue():
+                def _sync_preview() -> None:
+                    self.update_idletasks()
+                    self._update_preview()
+
+                self.after_idle(_sync_preview)
+            else:
+                self._refresh_designer()
 
     # ═════════════════════════════════════════════════════════════════════
     #  TAB 1 — Import & Select Faces
@@ -617,20 +690,25 @@ class App(ctk.CTk):
             )
             return
 
-        existing_ids = {p.id for p in self.persons}
+        existing_face_ids = {p.source_face_id for p in self.persons if p.source_face_id}
         added = 0
         for f in sel:
-            if f.id in existing_ids:
+            if f.id in existing_face_ids:
                 continue
             self._person_counter += 1
             self.persons.insert(
                 0,
                 Person(
-                    id=f.id,
+                    id=str(uuid.uuid4()),
                     name=f"Face {self._person_counter}",
                     face_image=f.cropped.copy(),
                     face_tight_image=f.tight_cropped.copy(),
                     is_low_res=f.is_low_res,
+                    needs_png_write=True,
+                    file_stem="",
+                    original_image=f.source_path or "",
+                    date_added=datetime.now().isoformat(timespec="seconds"),
+                    source_face_id=f.id,
                 ),
             )
             added += 1
@@ -691,7 +769,7 @@ class App(ctk.CTk):
         self._lib_scroll = ctk.CTkScrollableFrame(tab)
         self._lib_scroll.pack(fill="both", expand=True, padx=4, pady=4)
         self._lib_cols = 0
-        self._lib_card_width = 140  # approximate card width including padding
+        self._lib_card_width = 160  # approximate card width including padding
         self._lib_scroll.bind("<Configure>", self._on_lib_resize)
         self._show_lib_empty()
 
@@ -713,17 +791,37 @@ class App(ctk.CTk):
         return max(1, w // self._lib_card_width)
 
     def _on_lib_resize(self, event=None) -> None:
-        """Reflow cards when the frame width changes."""
+        """Reflow cards when the frame width changes (debounced — fullscreen fires many Configure events)."""
+        if self._lib_building:
+            return
+        if not self._lib_cards:
+            return
+        if hasattr(self, "_lib_resize_job"):
+            self.after_cancel(self._lib_resize_job)
+        self._lib_resize_job = self.after(120, self._apply_lib_resize)
+
+    def _apply_lib_resize(self) -> None:
+        if self._lib_building:
+            return
         new_cols = self._calc_lib_cols()
         if new_cols != self._lib_cols and self._lib_cards:
             self._lib_cols = new_cols
-            self._regrid_lib_cards()
+            if self._lib_use_virtual:
+                self._lib_reconfigure_virtual_rows()
+                self._lib_sync_virtual_cards()
+            else:
+                self._regrid_lib_cards()
 
     def _regrid_lib_cards(self) -> None:
         """Re-grid all existing cards into current column count — no rebuilds."""
         cols = self._lib_cols or self._calc_lib_cols()
         for ci in range(cols):
             self._lib_scroll.grid_columnconfigure(ci, weight=1)
+        if self._lib_use_virtual:
+            self._lib_reconfigure_virtual_rows()
+            self._lib_sync_virtual_cards()
+            self.after(50, self._fix_lib_scroll_region)
+            return
         for i, p in enumerate(self.persons):
             card = self._lib_cards.get(p.id)
             if card and card.winfo_exists():
@@ -732,21 +830,23 @@ class App(ctk.CTk):
         self.after(50, self._fix_lib_scroll_region)
 
     def _refresh_library(self) -> None:
-        # Skip full rebuild if nothing changed and cards already exist
         if not self._lib_dirty and self._lib_cards:
             return
 
         self._lib_dirty = False
         self._lib_build_token += 1
-        token = self._lib_build_token
+        self._lib_building = True
+        self._lib_use_virtual = False
 
         for w in self._lib_scroll.winfo_children():
             w.destroy()
         self._lib_refs.clear()
         self._print_btns.clear()
         self._lib_cards.clear()
+        self._lib_img_labels.clear()
 
         if not self.persons:
+            self._lib_building = False
             self._show_lib_empty()
             return
 
@@ -755,22 +855,135 @@ class App(ctk.CTk):
         for ci in range(cols):
             self._lib_scroll.grid_columnconfigure(ci, weight=1)
 
-        persons_snapshot = list(self.persons)
+        n = len(self.persons)
+        if n > _LIB_VIRTUAL_THRESHOLD:
+            self._lib_use_virtual = True
+            self._refresh_library_virtual()
+            return
 
-        def _build_row(start: int) -> None:
-            if token != self._lib_build_token:
-                return
-            end = min(start + cols, len(persons_snapshot))
-            for i in range(start, end):
-                self._make_lib_card(persons_snapshot[i], i, cols)
-            if end < len(persons_snapshot):
-                self.after(0, _build_row, end)
+        self._lib_chunk_token = self._lib_build_token
+        if n <= _LIB_CHUNK_SIZE:
+            for i, p in enumerate(self.persons):
+                self._make_lib_card(p, i, cols)
+            self._lib_finish_build()
+        else:
+            self._lib_chunk_idx = 0
+            self._lib_chunk_cols = cols
+            self._lib_schedule_next_chunk()
+
+    def _lib_schedule_next_chunk(self) -> None:
+        if self._lib_chunk_token != self._lib_build_token:
+            return
+        cols = self._lib_chunk_cols
+        end = min(self._lib_chunk_idx + _LIB_CHUNK_SIZE, len(self.persons))
+        for i in range(self._lib_chunk_idx, end):
+            self._make_lib_card(self.persons[i], i, cols)
+        self._lib_chunk_idx = end
+        if self._lib_chunk_idx < len(self.persons):
+            self.after(1, self._lib_schedule_next_chunk)
+        else:
+            self._lib_finish_build()
+
+    def _lib_finish_build(self) -> None:
+        self._lib_building = False
+        self.after(50, self._fix_lib_scroll_region)
+
+    def _refresh_library_virtual(self) -> None:
+        n = len(self.persons)
+        cols = self._lib_cols
+        n_rows = (n + cols - 1) // cols
+        for r in range(n_rows):
+            self._lib_scroll.grid_rowconfigure(r, minsize=_LIB_ROW_HEIGHT)
+        self._lib_bind_viewport_once()
+        self._lib_sync_virtual_cards()
+        self._lib_finish_build()
+
+    def _lib_reconfigure_virtual_rows(self) -> None:
+        n = len(self.persons)
+        cols = self._lib_cols or self._calc_lib_cols()
+        n_rows = (n + cols - 1) // cols if n else 0
+        for r in range(n_rows):
+            self._lib_scroll.grid_rowconfigure(r, minsize=_LIB_ROW_HEIGHT)
+
+    def _lib_bind_viewport_once(self) -> None:
+        if getattr(self, "_lib_viewport_hooked", False):
+            return
+        self._lib_viewport_hooked = True
+        try:
+            canvas = self._lib_scroll._parent_canvas
+        except Exception:
+            return
+
+        def _on_cfg(_e=None):
+            self._lib_on_viewport_event()
+
+        canvas.bind("<Configure>", _on_cfg, add="+")
+
+        def _wheel(_e=None):
+            self._lib_on_viewport_event()
+
+        canvas.bind("<MouseWheel>", _wheel, add="+")
+        canvas.bind("<Button-4>", _wheel, add="+")
+        canvas.bind("<Button-5>", _wheel, add="+")
+
+    def _lib_on_viewport_event(self, event=None) -> None:
+        if not self._lib_use_virtual:
+            return
+        if self._lib_viewport_job is not None:
+            try:
+                self.after_cancel(self._lib_viewport_job)
+            except Exception:
+                pass
+        self._lib_viewport_job = self.after(60, self._lib_sync_virtual_cards)
+
+    def _lib_sync_virtual_cards(self) -> None:
+        self._lib_viewport_job = None
+        if not self.persons or not self._lib_use_virtual:
+            return
+        n = len(self.persons)
+        cols = self._lib_cols or self._calc_lib_cols()
+        n_rows = (n + cols - 1) // cols
+        try:
+            canvas = self._lib_scroll._parent_canvas
+            top, bottom = canvas.yview()
+            content_h = max(1, n_rows * _LIB_ROW_HEIGHT)
+            y0 = top * content_h
+            y1 = bottom * content_h
+        except Exception:
+            content_h = max(1, n_rows * _LIB_ROW_HEIGHT)
+            y0, y1 = 0.0, float(content_h)
+
+        r0 = max(0, int(y0 // _LIB_ROW_HEIGHT) - 1)
+        r1 = min(n_rows - 1, max(0, int((y1 + _LIB_ROW_HEIGHT - 1) // _LIB_ROW_HEIGHT) + 1))
+        wanted: set[int] = set()
+        for r in range(r0, r1 + 1):
+            for c in range(cols):
+                i = r * cols + c
+                if i < n:
+                    wanted.add(i)
+
+        idx_by_pid = {p.id: i for i, p in enumerate(self.persons)}
+        for pid in list(self._lib_cards.keys()):
+            i = idx_by_pid.get(pid)
+            if i is None or i not in wanted:
+                card = self._lib_cards.pop(pid, None)
+                self._print_btns.pop(pid, None)
+                self._lib_img_labels.pop(pid, None)
+                if card and card.winfo_exists():
+                    card.destroy()
+
+        for i in sorted(wanted):
+            p = self.persons[i]
+            pid = p.id
+            if pid in self._lib_cards:
+                card = self._lib_cards[pid]
+                if card.winfo_exists():
+                    r, c = divmod(i, cols)
+                    card.grid(row=r, column=c, padx=4, pady=4, sticky="n")
             else:
-                # All cards placed — force the scrollable canvas to recalculate
-                # its scroll region so the scrollbar actually works.
-                self.after(50, self._fix_lib_scroll_region)
+                self._make_lib_card(p, i, cols)
 
-        _build_row(0)
+        self.after(50, self._fix_lib_scroll_region)
 
     def _fix_lib_scroll_region(self) -> None:
         """Force CTkScrollableFrame to recalculate its scroll region.
@@ -809,62 +1022,78 @@ class App(ctk.CTk):
         card.grid(row=r, column=c, padx=4, pady=4, sticky="n")
         self._lib_cards[p.id] = card
 
+        entry_bg = "#3b3b3b" if is_dark else "#f0f0f0"
+        entry_fg = "#e0e0e0" if is_dark else "#111111"
+
         use_tight = self._lib_crop_mode == "Faces"
         cache = self._lib_thumb_cache_tight if use_tight else self._lib_thumb_cache
         if p.id not in cache:
-            src = (p.face_tight_image or p.face_image) if use_tight else p.face_image
-            thumb = src.convert("RGB")
-            thumb.thumbnail((80, 80), Image.LANCZOS)
-            cache[p.id] = pil_to_ctk(thumb, (80, 80))
+            disk = load_disk_thumb(p.file_stem, use_tight)
+            if disk is not None:
+                cache[p.id] = ImageTk.PhotoImage(disk)
+            else:
+                if use_tight:
+                    ensure_face_tight_loaded(p)
+                src = (p.face_tight_image or p.face_image) if use_tight else p.face_image
+                thumb = src.convert("RGB")
+                thumb.thumbnail((96, 96), _THUMB_RESAMPLE)
+                cache[p.id] = ImageTk.PhotoImage(thumb)
         ref = cache[p.id]
         self._lib_refs.append(ref)
 
-        ctk.CTkLabel(card, image=ref, text="", fg_color=card_bg).pack(padx=6, pady=(6, 2))
+        img_lbl = tk.Label(card, image=ref, bg=card_bg, cursor="hand2")
+        img_lbl.pack(padx=8, pady=(8, 3))
+        self._lib_img_labels[p.id] = img_lbl
 
         if p.is_low_res:
             tk.Label(
-                card, text="⚠ Low-res source",
+                card, text="\u26a0 Low-res",
                 fg="#ffaa00", bg=card_bg, font=("Segoe UI", 8),
             ).pack()
 
-        name_var = ctk.StringVar(value=p.name)
-        ctk.CTkEntry(
-            card, textvariable=name_var, width=110, height=24, justify="center",
-            font=("Segoe UI", 10),
-        ).pack(padx=4, pady=2)
+        name_var = tk.StringVar(value=p.name)
+        tk.Entry(
+            card, textvariable=name_var, width=18, justify="center",
+            font=("Segoe UI", 10), bg=entry_bg, fg=entry_fg,
+            insertbackground=entry_fg, relief="flat", bd=1,
+            highlightthickness=1,
+            highlightbackground=card_border, highlightcolor="#1f538d",
+        ).pack(padx=6, pady=(0, 4), fill="x")
         name_var.trace_add(
             "write",
             lambda *_, pid=p.id, sv=name_var: self._rename(pid, sv.get()),
         )
 
         btns = tk.Frame(card, bg=card_bg)
-        btns.pack(pady=(0, 2))
+        btns.pack(pady=(0, 3))
         for txt, bg, cmd in [
-            ("▲", btn_bg, lambda pid=p.id: self._move(pid, -1)),
-            ("▼", btn_bg, lambda pid=p.id: self._move(pid,  1)),
-            ("✕", del_bg, lambda pid=p.id: self._delete(pid)),
+            ("\u25b2", btn_bg, lambda pid=p.id: self._move(pid, -1)),
+            ("\u25bc", btn_bg, lambda pid=p.id: self._move(pid,  1)),
+            ("\u2715", del_bg, lambda pid=p.id: self._delete(pid)),
         ]:
             tk.Button(
-                btns, text=txt, width=2, padx=0, pady=0,
+                btns, text=txt, width=2, padx=3, pady=2,
                 bg=bg, fg=btn_fg, relief="flat", borderwidth=0,
                 activebackground=card_border, activeforeground=btn_fg,
-                cursor="hand2", command=cmd,
-            ).pack(side="left", padx=1)
+                cursor="hand2", command=cmd, font=("Segoe UI", 9),
+            ).pack(side="left", padx=2)
 
         in_queue = any(q.id == p.id for q in self.print_queue)
-        pq_btn = ctk.CTkButton(
+        pq_btn = tk.Button(
             card,
-            text="✓ In Queue" if in_queue else "+ Add to Queue",
-            width=100, height=24,
-            fg_color="#1a4a28" if in_queue else "#1f538d",
-            hover_color="#993333" if in_queue else "#1a4a70",
-            font=("Segoe UI", 10, "bold" if in_queue else "normal"),
+            text="\u2713 In Queue" if in_queue else "+ Add to Queue",
+            bg="#1a4a28" if in_queue else "#1f538d",
+            fg="white", relief="flat", bd=0,
+            activebackground="#993333" if in_queue else "#1a4a70",
+            activeforeground="white",
+            font=("Segoe UI", 9, "bold" if in_queue else "normal"),
+            cursor="hand2", pady=4,
             command=lambda pid=p.id: (
                 self._remove_from_print_queue(pid) if any(q.id == pid for q in self.print_queue)
                 else self._add_to_print_queue(pid)
             ),
         )
-        pq_btn.pack(padx=4, pady=(0, 6))
+        pq_btn.pack(padx=6, pady=(0, 8), fill="x")
         self._print_btns[p.id] = pq_btn
 
     # ── Library persistence helpers ──────────────────────────────────────
@@ -882,8 +1111,11 @@ class App(ctk.CTk):
 
     def _sort_library_alpha(self) -> None:
         self.persons.sort(key=lambda p: p.name.lower())
-        self._lib_dirty = True
-        self._refresh_library()
+        if self._lib_cards:
+            self._regrid_lib_cards()
+        else:
+            self._lib_dirty = True
+            self._refresh_library()
         self._auto_save()
 
     def _clear_saved_library(self) -> None:
@@ -909,6 +1141,15 @@ class App(ctk.CTk):
         for p in self.persons:
             if p.id == pid:
                 p.name = name
+        # Keep print queue in sync with library (same person id)
+        self.print_queue = [
+            dataclasses.replace(q, name=name) if q.id == pid else q
+            for q in self.print_queue
+        ]
+        # Debounced designer refresh so quantity row labels update without rebuilding on every keypress
+        if hasattr(self, "_rename_des_job"):
+            self.after_cancel(self._rename_des_job)
+        self._rename_des_job = self.after(400, self._refresh_designer)
         # Debounce: save 1.5 s after the user stops typing
         if hasattr(self, "_rename_save_job"):
             self.after_cancel(self._rename_save_job)
@@ -924,12 +1165,16 @@ class App(ctk.CTk):
 
         self.persons[idx], self.persons[j] = self.persons[j], self.persons[idx]
 
-        cols = self._lib_cols or self._calc_lib_cols()
-        for pos, person in ((idx, self.persons[idx]), (j, self.persons[j])):
-            card = self._lib_cards.get(person.id)
-            if card and card.winfo_exists():
-                row, col = divmod(pos, cols)
-                card.grid(row=row, column=col, padx=4, pady=4, sticky="n")
+        if self._lib_use_virtual:
+            self._lib_reconfigure_virtual_rows()
+            self._lib_sync_virtual_cards()
+        else:
+            cols = self._lib_cols or self._calc_lib_cols()
+            for pos, person in ((idx, self.persons[idx]), (j, self.persons[j])):
+                card = self._lib_cards.get(person.id)
+                if card and card.winfo_exists():
+                    row, col = divmod(pos, cols)
+                    card.grid(row=row, column=col, padx=4, pady=4, sticky="n")
 
         self._auto_save()
 
@@ -943,6 +1188,7 @@ class App(ctk.CTk):
 
         self._lib_thumb_cache.pop(pid, None)
         self._lib_thumb_cache_tight.pop(pid, None)
+        self._lib_img_labels.pop(pid, None)
 
         # Destroy just this card — no full grid rebuild
         card = self._lib_cards.pop(pid, None)
@@ -974,12 +1220,21 @@ class App(ctk.CTk):
                 self.print_queue.append(dataclasses.replace(p, quantity=1))
                 break
         self._update_print_btn(pid, in_queue=True)
-        self._refresh_designer()
+        # First item: full refresh (clears empty placeholder). Further adds: one row only.
+        if len(self.print_queue) == 1:
+            self._refresh_designer()
+        else:
+            self._append_designer_row(self.print_queue[-1])
+            self._update_preview()
 
     def _remove_from_print_queue(self, pid: str) -> None:
         self.print_queue = [p for p in self.print_queue if p.id != pid]
         self._update_print_btn(pid, in_queue=False)
-        self._refresh_designer()
+        if not self.print_queue:
+            self._refresh_designer()
+        else:
+            self._remove_designer_row(pid)
+            self._update_preview()
 
     def _update_print_btn(self, pid: str, *, in_queue: bool) -> None:
         """Update just the one library card button — no full grid rebuild."""
@@ -988,16 +1243,16 @@ class App(ctk.CTk):
             return
         if in_queue:
             btn.configure(
-                text="✓ In Queue",
-                fg_color="#1a4a28", hover_color="#993333",
-                font=("Segoe UI", 11, "bold"),
+                text="\u2713 In Queue",
+                bg="#1a4a28", activebackground="#993333",
+                font=("Segoe UI", 9, "bold"),
                 command=lambda: self._remove_from_print_queue(pid),
             )
         else:
             btn.configure(
                 text="+ Add to Queue",
-                fg_color="#1f538d", hover_color="#1a4a70",
-                font=("Segoe UI", 11),
+                bg="#1f538d", activebackground="#1a4a70",
+                font=("Segoe UI", 9),
                 command=lambda: self._add_to_print_queue(pid),
             )
 
@@ -1120,6 +1375,26 @@ class App(ctk.CTk):
 
     def _on_lib_crop_toggle(self, mode: str) -> None:
         self._lib_crop_mode = mode
+        # Fast path: swap thumbnails in-place without destroying/rebuilding cards
+        if self._lib_img_labels:
+            use_tight = mode == "Faces"
+            cache = self._lib_thumb_cache_tight if use_tight else self._lib_thumb_cache
+            for p in self.persons:
+                if p.id not in cache:
+                    disk = load_disk_thumb(p.file_stem, use_tight)
+                    if disk is not None:
+                        cache[p.id] = ImageTk.PhotoImage(disk)
+                    else:
+                        if use_tight:
+                            ensure_face_tight_loaded(p)
+                        src = (p.face_tight_image or p.face_image) if use_tight else p.face_image
+                        thumb = src.convert("RGB")
+                        thumb.thumbnail((96, 96), _THUMB_RESAMPLE)
+                        cache[p.id] = ImageTk.PhotoImage(thumb)
+                lbl = self._lib_img_labels.get(p.id)
+                if lbl and lbl.winfo_exists():
+                    lbl.configure(image=cache[p.id])
+            return
         self._lib_dirty = True
         self._refresh_library()
 
@@ -1127,10 +1402,83 @@ class App(ctk.CTk):
         self._des_crop_mode = mode
         self._update_preview()
 
+    def _create_designer_row(self, p: Person) -> ctk.CTkFrame:
+        """Build one Design & Export quantity row (not packed)."""
+        row = ctk.CTkFrame(self._des_scroll, corner_radius=6)
+
+        thumb = p.face_image.convert("RGB")
+        thumb.thumbnail((44, 44), _THUMB_RESAMPLE)
+        ref = pil_to_ctk(thumb, (44, 44))
+        self._des_thumb_by_pid[p.id] = ref
+        ctk.CTkLabel(row, image=ref, text="").pack(side="left", padx=(6, 4))
+
+        ctk.CTkLabel(
+            row, text=p.name, width=90, anchor="w",
+        ).pack(side="left", padx=4)
+
+        qf = ctk.CTkFrame(row, fg_color="transparent")
+        qf.pack(side="right", padx=4)
+
+        ctk.CTkButton(
+            qf, text="✕", width=28, height=28,
+            fg_color="#993333", hover_color="#cc4444",
+            command=lambda pid=p.id: self._remove_from_print_queue(pid),
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            qf, text="−", width=30, height=28,
+            command=lambda pid=p.id: self._qty_delta(pid, -1),
+        ).pack(side="left")
+
+        qty_entry = ctk.CTkEntry(qf, width=46, height=28, justify="center")
+        qty_entry.insert(0, str(p.quantity))
+        qty_entry.pack(side="left", padx=3)
+        qty_entry.bind(
+            "<Return>",
+            lambda e, pid=p.id, ent=qty_entry: self._qty_set(pid, ent),
+        )
+        qty_entry.bind(
+            "<FocusOut>",
+            lambda e, pid=p.id, ent=qty_entry: self._qty_set(pid, ent),
+        )
+        self._des_qty_entries[p.id] = qty_entry
+
+        ctk.CTkButton(
+            qf, text="+", width=30, height=28,
+            command=lambda pid=p.id: self._qty_delta(pid, 1),
+        ).pack(side="left")
+
+        return row
+
+    def _designer_rows_match_queue(self) -> bool:
+        """True if the Design tab quantity list already matches print_queue (skip full rebuild)."""
+        if len(self.print_queue) != len(self._des_row_by_pid):
+            return False
+        for p in self.print_queue:
+            row = self._des_row_by_pid.get(p.id)
+            if row is None or not row.winfo_exists():
+                return False
+        return True
+
+    def _append_designer_row(self, p: Person) -> None:
+        """Add a single row without rebuilding the whole designer list."""
+        row = self._create_designer_row(p)
+        row.pack(fill="x", padx=4, pady=3)
+        self._des_row_by_pid[p.id] = row
+
+    def _remove_designer_row(self, pid: str) -> None:
+        """Remove one row and its refs; caller updates print_queue."""
+        row = self._des_row_by_pid.pop(pid, None)
+        if row is not None and row.winfo_exists():
+            row.destroy()
+        self._des_thumb_by_pid.pop(pid, None)
+        self._des_qty_entries.pop(pid, None)
+
     def _refresh_designer(self) -> None:
         for w in self._des_scroll.winfo_children():
             w.destroy()
-        self._des_refs.clear()
+        self._des_thumb_by_pid.clear()
+        self._des_row_by_pid.clear()
         self._des_qty_entries.clear()
 
         if not self.print_queue:
@@ -1143,50 +1491,9 @@ class App(ctk.CTk):
             return
 
         for p in self.print_queue:
-            row = ctk.CTkFrame(self._des_scroll, corner_radius=6)
+            row = self._create_designer_row(p)
             row.pack(fill="x", padx=4, pady=3)
-
-            thumb = p.face_image.convert("RGB")
-            thumb.thumbnail((44, 44), Image.LANCZOS)
-            ref = pil_to_ctk(thumb, (44, 44))
-            self._des_refs.append(ref)
-            ctk.CTkLabel(row, image=ref, text="").pack(side="left", padx=(6, 4))
-
-            ctk.CTkLabel(
-                row, text=p.name, width=90, anchor="w",
-            ).pack(side="left", padx=4)
-
-            qf = ctk.CTkFrame(row, fg_color="transparent")
-            qf.pack(side="right", padx=4)
-
-            ctk.CTkButton(
-                qf, text="✕", width=28, height=28,
-                fg_color="#993333", hover_color="#cc4444",
-                command=lambda pid=p.id: self._remove_from_print_queue(pid),
-            ).pack(side="left", padx=(0, 6))
-
-            ctk.CTkButton(
-                qf, text="−", width=30, height=28,
-                command=lambda pid=p.id: self._qty_delta(pid, -1),
-            ).pack(side="left")
-
-            qty_entry = ctk.CTkEntry(qf, width=46, height=28, justify="center")
-            qty_entry.insert(0, str(p.quantity))
-            qty_entry.pack(side="left", padx=3)
-            qty_entry.bind(
-                "<Return>",
-                lambda e, pid=p.id, ent=qty_entry: self._qty_set(pid, ent),
-            )
-            qty_entry.bind(
-                "<FocusOut>",
-                lambda e, pid=p.id, ent=qty_entry: self._qty_set(pid, ent),
-            )
-            self._des_qty_entries[p.id] = qty_entry
-
-            ctk.CTkButton(
-                qf, text="+", width=30, height=28,
-                command=lambda pid=p.id: self._qty_delta(pid, 1),
-            ).pack(side="left")
+            self._des_row_by_pid[p.id] = row
 
         self._update_preview()
 
@@ -1249,11 +1556,32 @@ class App(ctk.CTk):
     def _on_designer_resize(self, event=None) -> None:
         if not self.print_queue:
             return
-        if hasattr(self, "_des_resize_job"):
-            self.after_cancel(self._des_resize_job)
-        self._des_resize_job = self.after(80, self._update_preview)
+        if event is not None:
+            cw, ch = event.width, event.height
+            if cw < 20 or ch < 20:
+                return
+            last = getattr(self, "_des_last_size", (0, 0))
+            if abs(last[0] - cw) < 4 and abs(last[1] - ch) < 4:
+                return
+            self._des_last_size = (cw, ch)
+        if hasattr(self, "_des_resize_cheap_job"):
+            self.after_cancel(self._des_resize_cheap_job)
+        if hasattr(self, "_des_resize_full_job"):
+            self.after_cancel(self._des_resize_full_job)
+        self._des_resize_cheap_job = self.after(
+            _DES_RESIZE_DEBOUNCE_FAST_MS, self._apply_designer_preview_fast,
+        )
+        self._des_resize_full_job = self.after(
+            _DES_RESIZE_DEBOUNCE_FULL_MS, self._apply_designer_preview_full,
+        )
 
-    def _update_preview(self) -> None:
+    def _apply_designer_preview_fast(self) -> None:
+        self._update_preview(preview_dpi=_DES_PREVIEW_DPI_FAST)
+
+    def _apply_designer_preview_full(self) -> None:
+        self._update_preview(preview_dpi=_DES_PREVIEW_DPI_FULL)
+
+    def _update_preview(self, preview_dpi: int = _DES_PREVIEW_DPI_FULL) -> None:
         """Designer preview: always page 1 (no pagination)."""
         total_n = sum(p.quantity for p in self.print_queue)
         per_page = self._layout.per_page
@@ -1267,8 +1595,19 @@ class App(ctk.CTk):
         if cw < 20 or ch < 20:
             return
 
-        prev = render_preview(self.print_queue, 0, layout=self._layout,
-                              use_tight=(self._des_crop_mode == "Faces"))
+        eff_dpi = preview_dpi
+        if total_n > _PREVIEW_SLOTS_HARD:
+            eff_dpi = min(eff_dpi, _PREVIEW_DPI_HARD_CAP)
+        elif total_n > _PREVIEW_SLOTS_SOFT:
+            eff_dpi = min(eff_dpi, _PREVIEW_DPI_SOFT_CAP)
+
+        prev = render_preview(
+            self.print_queue,
+            0,
+            dpi=eff_dpi,
+            layout=self._layout,
+            use_tight=(self._des_crop_mode == "Faces"),
+        )
         fitted = fit_image(prev, cw, ch)
         self._des_preview_photo = ImageTk.PhotoImage(fitted)
         self._des_canvas.delete("all")

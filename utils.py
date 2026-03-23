@@ -5,6 +5,10 @@ from __future__ import annotations
 from PIL import Image
 import customtkinter as ctk
 
+from filename_utils import sanitize_filename_stem
+
+__all__ = ["pil_to_ctk", "fit_image", "sanitize_filename_stem"]
+
 
 def pil_to_ctk(
     pil_img: Image.Image,
