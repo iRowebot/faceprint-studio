@@ -95,14 +95,14 @@ The download isn’t **code-signed** because a Windows code-signing certificate 
 
 | Version | Library folder |
 |---|---|
-| Early releases (pre-1.3.0) | `C:\Users\<you>\.faceprint_studio\library` |
-| 1.3.0 and later | `Documents\FacePrintLibrary` |
+| Pre-1.5.0 | `C:\Users\<you>\.faceprint_studio\library` |
+| 1.5.0 and later | `Documents\FacePrintLibrary` |
 
-If you used an early version, your data was stored in a hidden folder under your home directory. Starting in v1.3.0 the library moved to your **Documents** folder so it's easy to find and back up.
+If you used an earlier version, your data was stored in a hidden folder under your home directory. Starting in v1.5.0 the library moved to your **Documents** folder so it's easy to find and back up.
 
 **The migration is automatic** — on first launch after updating, the app detects your old library and copies it to the new location. You don't need to do anything.
 
-If you are already on v1.3.0 or later, your library is already at `Documents\FacePrintLibrary` and nothing changes.
+If you are already on v1.5.0 or later, your library is already at `Documents\FacePrintLibrary` and nothing changes.
 
 ### Thumbnails (v1.5.0+)
 
