@@ -129,14 +129,17 @@ python main.py
 
 ## Building the Windows `.exe` (maintainers)
 
-Requires a Python environment with dependencies from `requirements.txt` plus PyInstaller:
+Use the **`faceprint`** Conda environment (dependencies + PyInstaller are installed there):
 
 ```bash
-pip install pyinstaller
+conda activate faceprint
+pip install pyinstaller   # once, if not already in the env
 python -m PyInstaller "FacePrint Studio.spec"
 ```
 
-The one-file `FacePrint Studio.exe` is written under `dist/`. The bundled `FacePrint Studio.spec` may reference paths from the machine that produced the last build—adjust `binaries` / `pathex` if Tcl/Tk DLLs are not found on your system.
+The one-file `FacePrint Studio.exe` is written under `dist/`. The spec picks up Tcl/Tk DLLs from Conda’s `Library\bin` or from a standard Python `DLLs` folder.
+
+> **Note:** A one-off project `.venv` is not required; if you previously created `.venv` in this repo, you can delete it and rely on `conda activate faceprint` instead.
 
 ---
 
