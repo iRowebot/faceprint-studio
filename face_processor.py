@@ -6,6 +6,7 @@ works great for group photos. No dlib, no cmake, no heavy dependencies.
 
 from __future__ import annotations
 
+import sys
 import urllib.request
 import uuid
 from dataclasses import dataclass
@@ -33,6 +34,19 @@ _YUNET_MODEL_URL = (
     "face_detection_yunet/face_detection_yunet_2023mar.onnx"
 )
 _MODELS_DIR = Path.home() / ".faceprint_studio" / "models"
+_YUNET_FILENAME = "face_detection_yunet_2023mar.onnx"
+
+
+def _bundled_yunet_path() -> Path | None:
+    """Path to ONNX shipped with the app (PyInstaller onefile extract dir or repo clone)."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        p = Path(sys._MEIPASS) / "models" / _YUNET_FILENAME
+        if p.is_file():
+            return p
+    p = Path(__file__).resolve().parent / "models" / _YUNET_FILENAME
+    if p.is_file():
+        return p
+    return None
 
 
 @dataclass
@@ -164,9 +178,12 @@ def _merge_yunet_fragments(
 
 
 def _ensure_yunet_model() -> Path:
-    """Download and cache the YuNet ONNX model."""
+    """Resolve YuNet ONNX: prefer bundled file (exe / repo); else download to user cache."""
+    bundled = _bundled_yunet_path()
+    if bundled is not None:
+        return bundled
     _MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    path = (_MODELS_DIR / "face_detection_yunet_2023mar.onnx").resolve()
+    path = (_MODELS_DIR / _YUNET_FILENAME).resolve()
     if not path.exists():
         urllib.request.urlretrieve(_YUNET_MODEL_URL, path)
     return path

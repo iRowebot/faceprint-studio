@@ -17,7 +17,7 @@ Upload group photos, let the app automatically find every face, organize them in
 > On first launch, Windows may show a "Windows protected your PC" SmartScreen warning.  
 > Click **"More info"** → **"Run anyway"** — this is normal for apps that aren't code-signed.
 
-> A small face detection model (~230 KB) will be downloaded automatically on first run. An internet connection is required the first time only.
+> The YuNet face detection model (~230 KB) is **included** in the app — no separate download or internet connection is required for detection.
 
 ### When your browser or antivirus blocks the download
 
@@ -85,7 +85,7 @@ The download isn’t **code-signed** because a Windows code-signing certificate 
 - **HEIC/HEIF support** — works with iPhone photos directly
 - **Smart edge padding** — padding color matches the photo background
 - **Drag & drop** and **paste from clipboard (Ctrl+V)** support
-- **Fully offline** after first run — no cloud, no account, no API keys
+- **Fully offline** — no cloud, no account, no API keys (face model is bundled)
 
 ---
 

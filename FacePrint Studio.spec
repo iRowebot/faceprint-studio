@@ -1,26 +1,44 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os, sys
+"""PyInstaller one-file build. Works with conda Python (Library\\bin) or standard Windows Python (DLLs)."""
+import os
+import sys
+
 from PyInstaller.utils.hooks import collect_all
 
-_CONDA = os.path.dirname(sys.executable)
-_CONDA_BIN = os.path.join(_CONDA, 'Library', 'bin')
+_PREFIX = sys.prefix
+_CONDA_BIN = os.path.join(os.path.dirname(sys.executable), "Library", "bin")
+_DLLS = os.path.join(_PREFIX, "DLLs")
 
-datas = [('icon.ico', '.')]
-binaries = [
-    (os.path.join(_CONDA_BIN, 'tcl86t.dll'), '.'),
-    (os.path.join(_CONDA_BIN, 'tk86t.dll'), '.'),
-    (os.path.join(_CONDA_BIN, 'zlib1.dll'), '.'),
+datas = [
+    ("icon.ico", "."),
+    ("models/face_detection_yunet_2023mar.onnx", "models"),
 ]
-hiddenimports = []
-tmp_ret = collect_all('pillow_heif')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('tkinterdnd2')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+binaries: list = []
 
+# Tcl/Tk / zlib — include only files that exist (conda vs python.org layout)
+for folder in (_CONDA_BIN, _DLLS):
+    if not os.path.isdir(folder):
+        continue
+    for name in ("tcl86t.dll", "tk86t.dll", "zlib1.dll"):
+        p = os.path.join(folder, name)
+        if os.path.isfile(p) and not any(b[0] == p for b in binaries):
+            binaries.append((p, "."))
+
+hiddenimports: list = []
+tmp_ret = collect_all("pillow_heif")
+datas += tmp_ret[0]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
+tmp_ret = collect_all("tkinterdnd2")
+datas += tmp_ret[0]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
+
+_pathex = [p for p in (_CONDA_BIN,) if os.path.isdir(_CONDA_BIN)]
 
 a = Analysis(
-    ['main.py'],
-    pathex=[_CONDA_BIN],
+    ["main.py"],
+    pathex=_pathex,
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -39,7 +57,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='FacePrint Studio',
+    name="FacePrint Studio",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -52,5 +70,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['icon.ico'],
+    icon=["icon.ico"],
 )
